@@ -1,5 +1,47 @@
-.venv
+# Local agent instructions and project documentation
+AGENTS.md
+/docs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.tox/
+.nox/
+
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test, lint, type-check and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local configuration and logs (keep sanitized example templates trackable)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.log
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# HAR captures and legacy JSON/YAML traffic exports
+# Add narrow exceptions when introducing tracked schemas or synthetic fixtures.
+*.har
 *.json
 *.yaml
-*.har
-.idea
