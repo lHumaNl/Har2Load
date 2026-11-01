@@ -2,6 +2,12 @@
 AGENTS.md
 /docs/
 
+# Private source recordings and manually edited reference scripts
+/samples/
+
+# Private generated workspaces, including future non-JSON assets
+/workspaces/
+
 # Virtual environments
 .venv/
 venv/

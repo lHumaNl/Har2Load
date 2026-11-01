@@ -1,0 +1,13 @@
+# Pinned tooling; the application has no runtime dependencies.
+setuptools==80.9.0
+pytest==8.4.2
+iniconfig==2.1.0
+packaging==25.0
+pluggy==1.6.0
+Pygments==2.19.2
+colorama==0.4.6; sys_platform == "win32"
+ruff==0.14.3
+mypy==1.18.2
+mypy_extensions==1.1.0
+pathspec==0.12.1
+typing_extensions==4.15.0
