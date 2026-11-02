@@ -195,6 +195,7 @@ def test_legacy_scenario_reports_do_not_upgrade_or_write_workspace(tmp_path, sch
     model = json.loads(scenario_path.read_bytes())
     model["schema_version"] = schema
     del model["parameters"]
+    del model["target_extensions"]
     if schema == "1.0":
         del model["representation_selections"]
     encoded = canonical_bytes(model)

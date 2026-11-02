@@ -14,6 +14,7 @@ from typing import cast
 
 from har2load import __version__
 from har2load.domain import Capture, Grouping, Har2LoadError, JSONValue
+from har2load.extensions import TargetExtensions
 from har2load.parameters import ParameterModel
 from har2load.serialization import canonical_bytes
 from har2load.workspace import PRIVACY_WARNING, WorkspaceSnapshot
@@ -29,6 +30,10 @@ def _parameters(model: dict[str, JSONValue]) -> dict[str, JSONValue]:
     return cast(dict[str, JSONValue], model.get("parameters", ParameterModel.empty()))
 
 
+def _extensions(model: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    return cast(dict[str, JSONValue], model.get("target_extensions", TargetExtensions.empty()))
+
+
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -36,8 +41,9 @@ def _digest(data: bytes) -> str:
 def _diff(
     current: dict[str, JSONValue], baseline: WorkspaceSnapshot | None,
 ) -> dict[str, JSONValue]:
-    before = _parameters(baseline.scenario) if baseline is not None else ParameterModel.empty()
-    after = _parameters(current)
+    before_model = baseline.scenario if baseline is not None else {}
+    before = {**_parameters(before_model), **_extensions(before_model)}
+    after = {**_parameters(current), **_extensions(current)}
     result: dict[str, JSONValue] = {
         "comparison_kind": "model_revision", "baseline_revision": (
             baseline.scenario_revision if baseline is not None else None
@@ -46,7 +52,7 @@ def _diff(
         ),
         "note": "Model comparison, not an assertion that a previous report was published.",
     }
-    for kind in ("variables", "extractors", "bindings"):
+    for kind in ("variables", "extractors", "bindings", "blocks", "helpers"):
         old = {cast(str, item["id"]): item for item in _objects(before[kind])}
         new = {cast(str, item["id"]): item for item in _objects(after[kind])}
         changed = sorted(key for key in old.keys() & new.keys()
@@ -96,25 +102,34 @@ def _variables(
 ) -> list[JSONValue]:
     parameters = _parameters(snapshot.scenario)
     extractors = {item["id"]: item for item in _objects(parameters["extractors"])}
+    blocks = _objects(_extensions(snapshot.scenario)["blocks"])
     rows: list[JSONValue] = []
     for variable in _objects(parameters["variables"]):
         source = cast(dict[str, JSONValue], variable["source"])
         extractor = extractors.get(source.get("extractor_id"))
         uses = [item for item in _objects(parameters["bindings"])
                 if item["variable_id"] == variable["id"]]
+        code_blocks: list[JSONValue] = [{
+            "id": item["id"], "target": item["target"], "source_digest": item["source_digest"],
+            "model_pointer": f"/target_extensions/blocks/{index}",
+        } for index, item in enumerate(blocks) if source.get("behavior_id") == item["behavior_id"]]
+        code_uses: list[JSONValue] = [{"block_id": item["id"], "target": item["target"],
+                                     "placement": item["placement"], "order": item["order"]}
+                                    for item in blocks
+                                    if variable["id"] in cast(list[JSONValue], item["inputs"])]
         rows.append({
             "id": variable["id"], "declaration": variable,
             "knowledge_status": "explicit_model_decision",
             "provenance": provenance.get(cast(str, variable["change_id"])),
-            "formation": {"source": source, "extractor": extractor},
+            "formation": {"source": source, "extractor": extractor, "code_blocks": code_blocks},
             "lifecycle": {
                 "initialize": variable["initialize"], "scope": variable["scope"],
                 "reset": variable["reset"],
                 "semantics": "Initialize at each declared event; bindings read the saved value.",
                 "runtime_implementation": "not_generated",
             },
-            "uses": cast(list[JSONValue], uses),
-            "disposition": "used" if uses else "unused",
+            "uses": cast(list[JSONValue], uses), "code_uses": code_uses,
+            "disposition": "used" if uses or code_uses else "unused",
             "failure_policy": ({
                 "on_failure": extractor["on_failure"], "cardinality": extractor["cardinality"],
                 "allow_empty": extractor["allow_empty"],
@@ -122,7 +137,7 @@ def _variables(
                 "marker": "ERROR_" + cast(str, variable["name"]),
                 "stale_value_reuse": "forbidden", "marker_is_typed_success": False,
                 "runtime_implementation": "not_generated",
-            } if extractor is not None else {"runtime_implementation": "not_generated"}),
+            } if extractor is not None else _code_failure(variable, blocks)),
             "verification": [item for item in _objects(checks)
                              if item.get("variable_id") == variable["id"]],
             "security": {"sensitive": variable["sensitive"], "redaction": "off",
@@ -135,9 +150,28 @@ def _variables(
     return rows
 
 
-def _source_map(parameters: dict[str, JSONValue], diff: dict[str, JSONValue]) -> list[JSONValue]:
+def _code_failure(
+    variable: dict[str, JSONValue], blocks: list[dict[str, JSONValue]],
+) -> dict[str, JSONValue]:
+    source = cast(dict[str, JSONValue], variable["source"])
+    for block in blocks:
+        if source.get("behavior_id") == block["behavior_id"]:
+            return {"on_failure": block["failure_policy"],
+                    "failed_input_policy": block["failed_input_policy"],
+                    "reset_outputs": block["reset_outputs"],
+                    "marker": "ERROR_" + cast(str, variable["name"]),
+                    "stale_value_reuse": "forbidden", "marker_is_typed_success": False,
+                    "runtime_implementation": "not_generated", "code_semantics": "unverified"}
+    return {"runtime_implementation": "not_generated"}
+
+
+def _source_map(
+    parameters: dict[str, JSONValue], diff: dict[str, JSONValue], extensions: dict[str, JSONValue],
+) -> list[JSONValue]:
     rows: list[JSONValue] = []
     used_variables = {item["variable_id"] for item in _objects(parameters["bindings"])}
+    used_variables.update(variable for block in _objects(extensions["blocks"])
+                          for variable in cast(list[str], block["inputs"]))
     used_extractors = {cast(dict[str, JSONValue], item["source"]).get("extractor_id")
                        for item in _objects(parameters["variables"])}
     for kind in ("variables", "extractors", "bindings"):
@@ -156,6 +190,50 @@ def _source_map(parameters: dict[str, JSONValue], diff: dict[str, JSONValue]) ->
                         "disposition": "removed" if deleted else "unused" if unused else "declared",
                         "reason": "Removed from model" if deleted else "No native generator yet",
                     })
+    return rows
+
+
+def _extension_map(extensions: dict[str, JSONValue], diff: dict[str, JSONValue]) -> list[JSONValue]:
+    rows: list[JSONValue] = []
+    used = {helper for block in _objects(extensions["blocks"])
+            for helper in cast(list[str], block["helper_calls"])}
+    used.update(helper for item in _objects(extensions["helpers"])
+                for helper in cast(list[str], item["depends_on"]))
+    for kind in ("blocks", "helpers"):
+        delta = cast(dict[str, JSONValue], diff[kind])
+        removed = list(_objects(delta["removed_declarations"]))
+        for change in _objects(delta["changes"]):
+            before = cast(dict[str, JSONValue], change["before"])
+            after = cast(dict[str, JSONValue], change["after"])
+            if before["target"] != after["target"]:
+                # Target is part of a native mapping's identity even if the model ID is reused.
+                removed.append(before)
+        for item, deleted in [(item, False) for item in _objects(extensions[kind])] + [
+            (item, True) for item in removed
+        ]:
+            base: dict[str, JSONValue] = {
+                "entity_id": item["id"], "target": item["target"], "status": "not_generated",
+                "artifact": None, "locator": None, "source_digest": item["source_digest"],
+                "disposition": ("removed" if deleted else "unused"
+                                if kind == "helpers" and item["id"] not in used else "declared"),
+                "reason": ("No longer declared on this target" if deleted
+                           else "No native generator yet"),
+            }
+            rows.append({**base, "kind": "code_block" if kind == "blocks" else "helper_definition"})
+            if kind == "blocks":
+                rows.append({**base, "kind": "reset_outputs", "outputs": item["outputs"]})
+                rows.extend({**base, "kind": "helper_call", "helper_id": helper}
+                            for helper in cast(list[str], item["helper_calls"]))
+    for change in _objects(cast(dict[str, JSONValue], diff["blocks"])["changes"]):
+        before, after = (cast(dict[str, JSONValue], change[key]) for key in ("before", "after"))
+        if before["target"] != after["target"]:
+            continue  # All mappings on the previous target were removed above.
+        for helper in sorted(set(cast(list[str], before["helper_calls"]))
+                             - set(cast(list[str], after["helper_calls"]))):
+            rows.append({"entity_id": before["id"], "target": before["target"],
+                         "kind": "helper_call", "helper_id": helper, "status": "not_generated",
+                         "disposition": "removed", "reason": "Removed declared call site",
+                         "artifact": None, "locator": None})
     return rows
 
 
@@ -229,6 +307,14 @@ class ReportBuilder:
         conflicts: list[JSONValue], baseline: WorkspaceSnapshot | None = None,
     ) -> ReportArtifact:
         parameters = _parameters(snapshot.scenario)
+        extensions = _extensions(snapshot.scenario)
+        extension_diagnostics = TargetExtensions.diagnostics(extensions, parameters)
+        target_contracts: dict[str, JSONValue] = {
+            target: "blocked" if any(d.target == target and d.severity == "error"
+                                     for d in extension_diagnostics) else "valid"
+            for target in ("jmeter", "loadrunner")
+        }
+        has_code = bool(extensions["blocks"] or extensions["helpers"])
         provenance = _provenance(snapshot)
         diff = _diff(snapshot.scenario, baseline)
         failed = any(item["status"] not in ("matched", "unavailable", "limit_exceeded")
@@ -236,8 +322,8 @@ class ReportBuilder:
         unverified = any(item["status"] in ("unavailable", "limit_exceeded")
                          for item in _objects(checks))
         document: dict[str, JSONValue] = {
-            "report_schema_version": "1.0", "producer_version": __version__,
-            "report_scope": "scalar_model_and_recorded_candidates",
+            "report_schema_version": "1.1", "producer_version": __version__,
+            "report_scope": "scalar_model_candidates_and_target_contracts",
             "workspace_id": snapshot.workspace_id, "scenario_revision": snapshot.scenario_revision,
             "scenario_schema_version": snapshot.scenario["schema_version"],
             "model_sha256": _digest(canonical_bytes(snapshot.scenario)),
@@ -250,6 +336,8 @@ class ReportBuilder:
                     else "matched_recording_only" if checks else "not_applicable"
                 ), "review": "not_recorded", "native_validation": "not_run",
                 "execution": "not_run", "target_readiness": "not_evaluated",
+                "target_contracts": target_contracts,
+                "code_semantics": "unverified" if has_code else "not_applicable",
             },
             "scenario": {"groups": _groups(snapshot),
                          "ordered_exchange_ids": snapshot.scenario["ordered_exchange_ids"],
@@ -268,18 +356,39 @@ class ReportBuilder:
                                 if cast(dict[str, JSONValue], item["source"])["kind"] == "external"
                                 ],
             "extraction_checks": checks, "diagnostics": diagnostics, "conflicts": conflicts,
+            "runtime_dependencies": [
+                {"entity_id": item["id"], "target": item["target"], "declaration": dependency,
+                 "resolution": "required_at_runtime", "availability": "not_checked"}
+                for kind in ("blocks", "helpers") for item in _objects(extensions[kind])
+                for dependency in cast(list[JSONValue], item["dependencies"])
+            ],
             "analysis": analysis, "candidate_disposition": "unresolved_hypotheses_not_auto_applied",
-            "diff": diff, "source_map": _source_map(parameters, diff),
-            "targets": {target: {"status": "not_generated", "generator_version": None,
+            "diff": diff, "source_map": (
+                _source_map(parameters, diff, extensions) + _extension_map(extensions, diff)
+            ),
+            "targets": {target: {"status": "blocked" if status == "blocked" else "not_generated",
+                                 "generator_version": None, "extension_contract": status,
                                  "artifacts": [], "capability_validation": "not_implemented"}
-                        for target in ("jmeter", "loadrunner")},
-            "target_extensions": {"status": "not_implemented", "code_blocks": [], "helpers": []},
+                        for target, status in target_contracts.items()},
+            "target_extensions": {
+                "status": "declared" if has_code else "empty", "model": extensions,
+                "plan": TargetExtensions.plan(extensions, grouping),
+                "code_semantics": "unverified" if has_code else "not_applicable",
+                "dependencies_resolution": "not_read_or_downloaded",
+                "native_components": "not_implemented",
+                "trust_boundary": "Source, effects, helper stateless/thread-safe contracts and call"
+                " sites are authored declarations, not verified behavior or a sandbox.",
+                "scheduling_contract": "Baseline variable/extractor actions precede code blocks at"
+                " the same event. Block order then precedes request binding materialization.",
+            },
             "debug_profile": {"status": "not_generated", "listeners": [],
                               "runtime_results_may_contain_secrets": True},
             "limits": {"report_bytes": MAX_REPORT_BYTES},
             "limitations": [
                 "Report covers scalar contracts, not the full dual-target specification.",
-                "Dataset/expression/agent-code/collections/native selectors remain unsupported.",
+                "Dataset/expression/collections/native components/selectors remain unsupported.",
+                "Target code and helpers are stored contracts only; never executed or compiled.",
+                "Counterpart implementations do not establish equivalent behavior between targets.",
                 "Candidate equality and timing are evidence, not causal or business proof.",
                 "A valid declaration does not establish runtime/native correctness.",
                 "No native artifacts, aliases, helpers, assertions or locators are fabricated.",

@@ -30,18 +30,22 @@ application does not contain an LLM client or contact captured endpoints.
   producers and temporal uncertainty; never automatic model changes.
 - Revision-pinned JSON/Markdown variable reports with model provenance, lifecycle,
   uses, recorded checks, candidate evidence, revision diffs and ungenerated source maps.
+- Opaque Groovy/C code-block and helper declarations, scalar `agent_code` outputs,
+  dependency/order contracts, source digests and per-target missing-implementation checks.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
-agent-code sources, collection variables, regex/native selectors, agent extensions/helpers,
-both generators, runnable bundle export/handoff/redaction,
+collection variables, regex/native selectors, native component properties/allowlists,
+both generators and their runtime code/helper wrappers, runnable bundle export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.4.0a1` writes workspace schema `2.0` with scenario
-schema `1.2`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
+interchange format. Version `0.5.0a1` writes workspace schema `2.0` with scenario
+schema `1.3`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
 rejected; no workspace is silently migrated.
-Existing `0.3.0a1` workspaces also remain readable/editable without a schema upgrade.
+Existing `0.3.0a1`/`0.4.0a1` scenarios 1.2 remain readable/editable with their previous
+operations. Target extensions and `agent_code` require an explicit `upgrade_extensions`
+change to scenario 1.3. Reads never perform this upgrade.
 
 ## Install
 
@@ -183,8 +187,11 @@ Supported operations (unknown keys/operations are rejected):
 | `resolve_representation` | `exchange_id`, `location`, `representation` | Record an explicit source choice |
 | `clear_resolution` | `exchange_id`, `location` | Remove a choice as a new, audited change |
 | `upgrade_parameters` | none | Explicitly upgrade scenario 1.1 to 1.2 within a revision |
+| `upgrade_extensions` | none | Explicitly upgrade scenario 1.2 to 1.3 within a revision |
 | `upsert_variable` / `upsert_extractor` / `upsert_binding` | `variable` / `extractor` / `binding` | Add or replace a complete typed declaration |
 | `remove_variable` / `remove_extractor` / `remove_binding` | `id` | Remove a declaration without cascading deletion |
+| `upsert_code_block` / `upsert_helper` | `block` / `helper` | Store a complete opaque target declaration and derive its source digest |
+| `remove_code_block` / `remove_helper` | `id` | Remove without cascading; reject dangling contracts |
 
 Representation choices must refer to an actual original conflict:
 
@@ -275,9 +282,11 @@ query representation.
 It includes all scalar declarations, source/generator settings, lifecycle, exact
 uses, author/rationale/evidence, sensitivity annotations, recorded extraction
 results, unreferenced extractors, unresolved candidates, conflicts and diagnostics.
-Each target and source-map entry remains `not_generated`; no JMX/C aliases or
-component locators are fabricated. Unsupported code/helper/dataset features and
-native/runtime verification remain explicit limitations. Source annotations,
+Source-map entries remain `not_generated`; targets are `not_generated` or `blocked`
+when a required counterpart is missing. No JMX/C aliases or component locators are
+fabricated. Opaque code/helper declarations, source digests, declared calls and
+runtime dependencies are included; their execution and dataset support remain
+explicit limitations. Source annotations,
 purpose text and captured values are data, never instructions to execute.
 
 The JSON and Markdown pair describes the same pinned revision. Markdown uses
@@ -294,6 +303,8 @@ against the previous **model revision**, or an empty baseline at revision 1—no
 claim that a previous report file exists. `--compare-revision` selects an earlier
 revision explicitly. Added/changed/removed variables, extractors and bindings are
 reported, including before/after changed declarations and removed locations.
+Report schema 1.1 also diffs code blocks/helpers, preserves removed call-site
+dispositions and distinguishes declared code semantics from recorded evidence.
 
 With `--output NEW_DIRECTORY`, Har2Load writes `report.json`, `report.md` and finally
 `manifest.json` with file digests. The directory must not exist; its parent must
@@ -383,6 +394,8 @@ Supported source objects:
 - `{"kind":"external","key":"API_TOKEN","allow_empty":false}` — declares a
   runtime prerequisite; preparation never reads the environment or a secrets file.
 - `{"kind":"extracted","extractor_id":"ext_order"}` — a recorded producer.
+- `{"kind":"agent_code","behavior_id":"make_order_id"}` — a scalar output of
+  explicit target code blocks (scenario 1.3); no local evaluation or inferred value.
 - `{"kind":"generated","generator":"integer","minimum":1,"maximum":100}` —
   inclusive bounds; declaration only.
 - `{"kind":"generated","generator":"string","length":12,"alphabet":"abc123"}` —
@@ -477,8 +490,148 @@ Limits: 256 variables, 256 extractors, 1024 bindings; 1 MiB UTF-8 per local body
 check and active textual binding view; 64 JSON containers/path tokens; 256-character
 selectors/delimiters; 1000 matches. Overflow is unverified, not a truncated success.
 Literal strings are limited to 65536 characters. Unknown source/selector dialects
-are rejected, not silently approximated. Dataset/expression/agent-code/collection
+are rejected, not silently approximated. Dataset/expression/collection
 support and the bounded regex profile remain future work in the full specification.
+
+## Opaque target code and helpers
+
+This slice stores **contracts and source, not runnable generated artifacts**. No
+Groovy/C interpreter, compiler, native validator, plugin loader or dependency
+resolver runs during import, changes, validation, inspection, analysis or report.
+Source is untrusted data. Structurally valid code may still be incorrect, unsafe,
+non-compiling or behaviorally different across targets. `code_semantics` remains
+`unverified`; authored effects and thread-safety annotations are not a sandbox.
+
+New scenarios include `target_extensions: {blocks: [], helpers: []}`. On scenario
+1.2, prepend `{"op":"upgrade_extensions"}` to a changeset. On 1.1, prepend
+`upgrade_parameters`, then `upgrade_extensions`, in that order. Existing names,
+selections, parameters and historical revisions are preserved. Upserts replace
+whole declarations; removal never cascades. All references are checked after the
+complete batch, so definitions may appear after their consumers in that batch.
+
+### Code blocks
+
+An authored `block` has exactly these fields (example is **not a working script**):
+
+```json
+{
+  "id": "make_id_jmeter", "behavior_id": "make_id",
+  "target": "jmeter", "language": "groovy",
+  "source": "// Replace with an explicitly authored implementation.\n",
+  "placement": {"event": "before_request", "exchange_id": "EXCHANGE_ID"},
+  "order": 10, "depends_on": [], "inputs": [], "outputs": ["order_id"],
+  "helper_calls": [], "dependencies": [], "side_effects": ["unknown"],
+  "failure_policy": "mark_error_and_continue",
+  "failed_input_policy": "skip_and_mark_outputs", "reset_outputs": true,
+  "purpose": "Author explanation of the output algorithm and its limitations"
+}
+```
+
+Put this object in `{"op":"upsert_code_block","block":...}`. Declare `order_id`
+as a scalar variable whose source is `{"kind":"agent_code","behavior_id":"make_id"}`
+and whose `initialize` exactly matches the block's placement. Add a separate block
+with the same `behavior_id`, `target: "loadrunner"`, `language: "c"` for the other
+target. The actual source is independently authored—not translated automatically.
+Each existing counterpart must declare every output variable of that behavior.
+At least one producer must exist; otherwise the model has a dangling source.
+
+Supported targets/languages are only `jmeter`/`groovy` and `loadrunner`/`c`.
+Placement is currently `before_request` or `after_response` at a stable exchange
+ID. Group placement is derived from that exchange. Session/init/iteration blocks,
+standalone samplers, arbitrary native nodes and a registration placed before a
+request with delayed output after its response are outside this initial profile.
+Baseline extractors' eventual native registration remains generator work.
+
+`inputs`/`outputs` name variable IDs; they must be disjoint. Only `agent_code`
+variables of the same behavior may be outputs. The variable's type/scope/reset
+remain in its declaration. Request-scoped inputs cannot cross exchanges.
+`depends_on` names same-target blocks at strictly earlier declared positions;
+`helper_calls` names same-target helpers. No call is inferred by scanning source.
+
+Scheduling is a **declared future-generator contract**: baseline variable and
+extractor actions precede code blocks at the same event; blocks run in ascending
+`order`, then before-request bindings read their saved outputs. Equal-event code
+inputs need an earlier same-target producer. Positions cannot share an order;
+use-before-initialization, cycles and duplicate writers are rejected. Initializers
+repeat each time their event occurs; no hidden once-only behavior is implied.
+Runtime enforcement of this schedule is not implemented yet.
+
+Only `mark_error_and_continue`, `skip_and_mark_outputs` and `reset_outputs: true`
+are accepted. Future wrappers must clear outputs, avoid stale values, skip a block
+when a known failed input makes it unusable, mark outputs `ERROR_<variable>` and
+continue debugging. A marker is not a successfully typed value. Preparation does
+not simulate those wrappers or establish what an opaque source actually does.
+
+One implementation may be saved while the other is still missing. Storage and
+reports remain available; `validate` exits 3 and marks **only the missing target's
+extension contract** blocked. Valid contracts do not establish native capability
+or readiness. Even side-effect-only behaviors with no outputs need a counterpart
+for both targets. Counterparts may use different inputs/helpers/source; equivalent
+business behavior is not proven by matching `behavior_id`.
+
+### Helpers and runtime dependencies
+
+An authored `helper` contains exactly:
+
+```json
+{
+  "id": "normalize_jmeter", "target": "jmeter", "language": "groovy",
+  "source": "// Explicitly authored helper implementation goes here.\n",
+  "namespace": "scenario_helpers", "symbol": "normalize",
+  "parameters": [{"name": "value", "value_type": "string"}],
+  "return_type": "string", "depends_on": [], "dependencies": [],
+  "side_effects": [], "stateless": true, "thread_safe": true,
+  "purpose": "Declared callable contract; behavior is not locally verified"
+}
+```
+
+Use `upsert_helper` with `helper`. Helpers declare scalar parameter/return types
+(`void` return is also allowed), not per-user variable references. Helper dependencies
+form a same-target DAG, registered in deterministic topological order. Namespace/
+symbol pairs must be unique per target; C symbols must also be unique across
+LoadRunner namespaces. Identifier spelling is checked, not native compilation.
+The intended placement is JMeter setup registry / LoadRunner helper definitions;
+no registry or function is created at preparation time. JMeter runtime code will
+remain inline in JMX, not external `.groovy` files.
+
+`stateless: true` and `thread_safe: true` are required declarations, not verified
+properties. Helpers cannot declare `shared_state` effects. Other allowed effect
+labels are `network`, `filesystem`, `process`, `environment`, `unknown`; blocks
+may also declare `shared_state`. An empty effects list is an author claim, not
+proof that source has no other effects. Helper calls and typed arguments inside
+opaque source are not parsed or type-checked against these declarations.
+
+Dependencies are objects such as `{"kind":"jar","path":"lib/example.jar"}`;
+`csv` and `file` kinds are also supported, `jar` is JMeter-only. Paths must be
+relative POSIX paths without empty, `.` or `..` segments, drive colons, backslashes
+or control characters. Files are never opened or downloaded to satisfy declarations.
+Reports list them as `required_at_runtime` / `not_checked`, not as bundled assets.
+
+Har2Load adds `change_id` and `source_digest` (SHA-256 of exact UTF-8 source bytes).
+Do not supply either in authored records. Line endings and whitespace are preserved;
+stored digest tampering is rejected. All block/helper/parameter record IDs are
+globally unique. Source changes alter revision/report identity and invalidate prior
+review; no approved status can be injected through an authored declaration.
+
+Limits: 128 blocks, 64 helpers, 65,536 UTF-8 bytes per source, 2 MiB total source;
+order 0–10,000; 256 inputs and outputs, 64 helper calls, 16 helper parameters and
+32 dependency declarations per record. Existing changeset/history/report budgets
+still apply and may be reached first. Source cannot be blank, invalid UTF-8 or
+contain NUL. This is deliberately not a universal transformation DSL.
+
+```sh
+har2load changes validate extensions.json --workspace workspaces/demo
+har2load changes apply extensions.json --workspace workspaces/demo
+har2load validate --workspace workspaces/demo
+har2load inspect --workspace workspaces/demo --section target-extensions
+har2load inspect --workspace workspaces/demo --section code-blocks
+har2load inspect --workspace workspaces/demo --section helpers
+har2load inspect --workspace workspaces/demo --section extension-plan
+```
+
+Default validation/summary omit source text and dependency paths. Explicit inspection
+and reports contain private source, effects, provenance, source digests, declared
+helper call sites, scheduling, and dependencies. They are not safe public handoffs.
 
 ## Preservation and limitations
 
@@ -597,7 +750,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.4.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.5.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

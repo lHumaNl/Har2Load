@@ -151,6 +151,9 @@ def _source(source: dict[str, JSONValue], value_type: str) -> None:
         _identifier(source["extractor_id"])
     elif kind == "generated":
         _generated(source, value_type)
+    elif kind == "agent_code":
+        _shape(source, {"kind", "behavior_id"})
+        _identifier(source["behavior_id"])
     else:
         _require(False)
 
@@ -344,13 +347,19 @@ class ParameterModel:
         return True
 
     @staticmethod
-    def validate(parameters: JSONValue, capture: Capture, grouping: Grouping) -> None:
+    def validate(
+        parameters: JSONValue, capture: Capture, grouping: Grouping, *,
+        allow_agent_code: bool = False,
+    ) -> None:
         block = _shape(parameters, set(_LIMITS))
         records = {key: _records(block, key) for key in _LIMITS}
         identifiers = [record["id"] for values in records.values() for record in values]
         names = [record["name"] for record in records["variables"]]
         _require(len(set(cast(list[str], identifiers))) == len(identifiers))
         _require(len(set(cast(list[str], names))) == len(names))
+        if not allow_agent_code:
+            _require(all(_object(item["source"])["kind"] != "agent_code"
+                         for item in records["variables"]))
         _validate_references(records, capture, grouping)
 
     @staticmethod

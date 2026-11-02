@@ -44,6 +44,7 @@ def parser() -> argparse.ArgumentParser:
         "scenario", "history", "conflicts",
         "parameters", "variables", "extractors", "bindings", "extraction-checks",
         "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
+        "target-extensions", "code-blocks", "helpers", "extension-plan",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")

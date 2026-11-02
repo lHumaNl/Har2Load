@@ -6,9 +6,10 @@ reset_group_name, representation selections, explicit parameter upgrade, and
 typed parameter upsert/removal, never arbitrary patches. Evidence
 uses exchange-relative RFC 6901 pointers; existence is not truth certification.
 
-ScenarioEditor.initial emits schema 1.2: scaffold, ordered representation selections
-and scalar parameter contracts. Schema 1.1 upgrades only through an explicit
-upgrade_parameters change. Selections contain exchange_id/location/representation/change_id, plus
+ScenarioEditor.initial emits schema 1.3: scaffold, ordered representation selections,
+scalar parameter contracts and opaque target extensions. Earlier schemas upgrade
+only through explicit upgrade_parameters/upgrade_extensions changes.
+Selections contain exchange_id/location/representation/change_id, plus
 header_index only for a header choice. Keys are exchange_id/location; ordering is
 source index then location. Schema 1.0 is accepted only as the exact legacy draft.
 
@@ -28,6 +29,7 @@ from urllib.parse import urlsplit
 
 from har2load.binding_locations import BindingLocations
 from har2load.domain import Capture, Exchange, Grouping, Har2LoadError, JSONValue
+from har2load.extensions import TargetExtensions
 from har2load.parameters import ParameterModel
 from har2load.serialization import canonical_bytes
 
@@ -148,9 +150,11 @@ def _operation(value: JSONValue) -> None:
         optional = {"header_index"} if "header_index" in operation else set()
         _require(operation.keys() == keys | optional)
         _choice(operation)
-    elif kind == "upgrade_parameters":
+    elif kind in ("upgrade_parameters", "upgrade_extensions"):
         _require(operation.keys() == {"op"})
     elif ParameterModel.validate_operation(operation):
+        return
+    elif TargetExtensions.validate_operation(operation):
         return
     else:
         _invalid()
@@ -346,11 +350,32 @@ def _edit(scenario: dict[str, JSONValue], operation: dict[str, JSONValue],
         scenario["schema_version"] = "1.2"
         scenario["parameters"] = ParameterModel.empty()
         return
+    if operation["op"] == "upgrade_extensions":
+        _require(scenario["schema_version"] == "1.2")
+        scenario["schema_version"] = "1.3"
+        scenario["target_extensions"] = TargetExtensions.empty()
+        return
+    if TargetExtensions.validate_operation(operation):
+        if scenario["schema_version"] != "1.3":
+            raise Har2LoadError(
+                "SCENARIO_UPGRADE_REQUIRED", "Explicit upgrade_extensions operation required.", 3
+            )
+        TargetExtensions.apply_operation(
+            _object(scenario["target_extensions"]), operation, change_id
+        )
+        return
     if ParameterModel.validate_operation(operation):
-        if scenario["schema_version"] != "1.2":
+        if scenario["schema_version"] not in ("1.2", "1.3"):
             raise Har2LoadError(
                 "SCENARIO_UPGRADE_REQUIRED", "Explicit upgrade_parameters operation required.", 3
             )
+        if operation["op"] == "upsert_variable":
+            variable_source = _object(_object(operation["variable"])["source"])
+            if variable_source["kind"] == "agent_code" and scenario["schema_version"] != "1.3":
+                raise Har2LoadError(
+                    "SCENARIO_UPGRADE_REQUIRED",
+                    "Explicit upgrade_extensions operation required.", 3,
+                )
         ParameterModel.apply_operation(_object(scenario["parameters"]), operation, change_id)
         return
     if operation["op"] == "rename_group":
@@ -376,9 +401,9 @@ class ScenarioEditor:
     """Copy-on-success author intent; immutable source grouping and execution states."""
 
     def initial(
-        self, capture: Capture, grouping: Grouping, *, schema_version: str = "1.2",
+        self, capture: Capture, grouping: Grouping, *, schema_version: str = "1.3",
     ) -> dict[str, JSONValue]:
-        _require(schema_version in ("1.0", "1.1", "1.2"))
+        _require(schema_version in ("1.0", "1.1", "1.2", "1.3"))
         model: dict[str, JSONValue] = {
             "schema_version": schema_version, "revision": 1, "source_capture": capture.id,
             "step_gap_seconds": grouping.step_gap_seconds,
@@ -393,8 +418,10 @@ class ScenarioEditor:
         }
         if schema_version == "1.0":
             del model["representation_selections"]
-        elif schema_version == "1.2":
+        elif schema_version in ("1.2", "1.3"):
             model["parameters"] = ParameterModel.empty()
+        if schema_version == "1.3":
+            model["target_extensions"] = TargetExtensions.empty()
         return model
 
     def validate(self, scenario: JSONValue, capture: Capture, grouping: Grouping) -> None:
@@ -408,21 +435,29 @@ class ScenarioEditor:
         _require(value.keys() == expected.keys())
         _groups(value["groups"], expected["groups"])
         _selections(value["representation_selections"], _Source(capture))
-        if version == "1.2":
-            ParameterModel.validate(value["parameters"], capture, grouping)
+        if version in ("1.2", "1.3"):
+            ParameterModel.validate(
+                value["parameters"], capture, grouping, allow_agent_code=version == "1.3"
+            )
             BindingLocations().validate(
                 _object(value["parameters"]), capture, _array(value["representation_selections"])
             )
+        if version == "1.3":
+            TargetExtensions.validate(
+                value["target_extensions"], _object(value["parameters"]), capture, grouping
+            )
         immutable = {**value, "groups": expected["groups"], "revision": 1,
                       "representation_selections": []}
-        if version == "1.2":
+        if version in ("1.2", "1.3"):
             immutable["parameters"] = ParameterModel.empty()
+        if version == "1.3":
+            immutable["target_extensions"] = TargetExtensions.empty()
         _require(_same(immutable, expected))
 
     def apply(self, scenario: dict[str, JSONValue], capture: Capture, grouping: Grouping,
               change: ChangeSet) -> dict[str, JSONValue]:
         self.validate(scenario, capture, grouping)
-        _require(scenario["schema_version"] in ("1.1", "1.2"))
+        _require(scenario["schema_version"] in ("1.1", "1.2", "1.3"))
         validated = ChangeSet.parse(change.document)
         _require(validated.change_id == change.change_id and type(change.base_revision) is int
                  and validated.base_revision == change.base_revision)

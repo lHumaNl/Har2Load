@@ -145,6 +145,7 @@ def test_explicit_upgrade_preserves_old_revision_and_audit(tmp_path):
     model = json.loads(scenario_path.read_bytes())
     model["schema_version"] = "1.1"
     del model["parameters"]
+    del model["target_extensions"]
     scenario_path.write_bytes(canonical_bytes(model))
     manifest_path = workspace / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())

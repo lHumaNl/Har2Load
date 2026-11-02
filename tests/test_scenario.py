@@ -83,7 +83,7 @@ def apply(capture: Capture, document: JSONValue,
 def test_initial_contract_and_legacy_read_only(capture: Capture) -> None:
     scenario = initial(capture)
     assert scenario == {
-        "schema_version": "1.2", "revision": 1, "source_capture": capture.id,
+        "schema_version": "1.3", "revision": 1, "source_capture": capture.id,
         "step_gap_seconds": 5.0, "groups": [{
             "id": StepGrouper().group(capture).groups[0].id,
             "exchange_ids": [capture.exchanges[0].id], "name": " Original ",
@@ -92,9 +92,10 @@ def test_initial_contract_and_legacy_read_only(capture: Capture) -> None:
         "targets": {"jmeter": "not_generated", "loadrunner": "not_generated"},
         "native_validation": "not_run", "execution": "not_run", "representation_selections": [],
         "parameters": {"variables": [], "extractors": [], "bindings": []},
+        "target_extensions": {"blocks": [], "helpers": []},
     }
     legacy = {key: value for key, value in scenario.items()
-              if key not in ("representation_selections", "parameters")}
+              if key not in ("representation_selections", "parameters", "target_extensions")}
     legacy["schema_version"] = "1.0"
     EDITOR.validate(legacy, capture, StepGrouper().group(capture))
     with pytest.raises(Har2LoadError):

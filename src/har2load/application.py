@@ -6,6 +6,7 @@ from typing import cast
 from har2load.binding_locations import SourceViews
 from har2load.candidates import CandidateAnalyzer
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
+from har2load.extensions import TargetExtensions
 from har2load.grouping import StepGrouper
 from har2load.importer import HarImporter
 from har2load.parameters import ParameterModel
@@ -122,7 +123,8 @@ class Application:
             "contains_sensitive_data": True,
             "privacy_warning": PRIVACY_WARNING,
             "model_status": "draft",
-            "targets": {"jmeter": "not_generated", "loadrunner": "not_generated"},
+            "targets": {target: "blocked" if status == "blocked" else "not_generated"
+                        for target, status in self._target_contracts(scenario).items()},
             "native_validation": "not_run",
             "execution": "not_run",
         }
@@ -171,6 +173,7 @@ class Application:
             "groups", "diagnostics", "scenario", "history", "conflicts",
             "parameters", "variables", "extractors", "bindings", "extraction-checks",
             "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
+            "target-extensions", "code-blocks", "helpers", "extension-plan",
         ):
             if exchange_id is not None:
                 raise Har2LoadError("VIEW_ARGUMENT_CONFLICT", "This section is workspace-scoped.")
@@ -198,6 +201,14 @@ class Application:
                 value = analysis if section == "analysis" else analysis[
                     "candidates" if section == "candidates" else "diagnostics"
                 ]
+            elif section in ("target-extensions", "code-blocks", "helpers", "extension-plan"):
+                extensions = self._extensions(snapshot.scenario)
+                if section == "extension-plan":
+                    value = TargetExtensions.plan(extensions, grouping)
+                elif section == "target-extensions":
+                    value = extensions
+                else:
+                    value = extensions["blocks" if section == "code-blocks" else "helpers"]
             else:
                 value = [record(item) for item in diagnostics]
         else:
@@ -334,6 +345,21 @@ class Application:
     def _parameters(scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
         return cast(dict[str, JSONValue], scenario.get("parameters", ParameterModel.empty()))
 
+    @staticmethod
+    def _extensions(scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
+        return cast(
+            dict[str, JSONValue], scenario.get("target_extensions", TargetExtensions.empty())
+        )
+
+    def _extension_diagnostics(self, scenario: dict[str, JSONValue]) -> list[Diagnostic]:
+        return TargetExtensions.diagnostics(self._extensions(scenario), self._parameters(scenario))
+
+    def _target_contracts(self, scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
+        diagnostics = self._extension_diagnostics(scenario)
+        return {target: "blocked" if any(d.severity == "error" and d.target == target
+                                         for d in diagnostics) else "valid"
+                for target in ("jmeter", "loadrunner")}
+
     def _parameter_counts(self, scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
         parameters = self._parameters(scenario)
         counts: dict[str, JSONValue] = {
@@ -344,6 +370,14 @@ class Application:
                    cast(list[dict[str, JSONValue]], parameters["variables"])]
         counts["external_input_count"] = sources.count("external")
         counts["generated_variable_count"] = sources.count("generated")
+        counts["agent_code_variable_count"] = sources.count("agent_code")
+        extensions = self._extensions(scenario)
+        counts["code_block_count"] = len(cast(list[JSONValue], extensions["blocks"]))
+        counts["helper_count"] = len(cast(list[JSONValue], extensions["helpers"]))
+        counts["declared_dependency_count"] = sum(
+            len(cast(list[JSONValue], item["dependencies"])) for key in ("blocks", "helpers")
+            for item in cast(list[dict[str, JSONValue]], extensions[key])
+        )
         return counts
 
     def _extraction_checks(
@@ -415,6 +449,7 @@ class Application:
                 "SOURCE_REPRESENTATIONS_UNRESOLVED", "warning",
                 "Original representation conflicts remain; target readiness is not established.",
             ))
+        diagnostics.extend(self._extension_diagnostics(scenario))
         return diagnostics
 
     def validate(
@@ -430,6 +465,7 @@ class Application:
         unverified = sum(item["status"] in ("unavailable", "limit_exceeded") for item in checks)
         diagnostics = self._validation_findings(snapshot.scenario, capture, checks)
         parameter_counts = self._parameter_counts(snapshot.scenario)
+        target_contracts = self._target_contracts(snapshot.scenario)
         safe_checks: list[JSONValue] = [
             {key: item[key] for key in ("variable_id", "extractor_id", "status", "match_count",
                                        "failure_marker", "verification", "source_view",
@@ -449,12 +485,19 @@ class Application:
                 "checks": safe_checks, "offset": offset,
                 "validation_scope": "model_contract_and_recorded_extractors",
                 "target_readiness": "not_evaluated", "native_validation": "not_run",
+                "target_contracts": target_contracts,
+                "code_semantics": (
+                    "unverified" if parameter_counts["code_block_count"] or parameter_counts[
+                        "helper_count"] else "not_applicable"
+                ),
                 "execution": "not_run", "runtime_inputs": (
-                    "required_at_runtime" if parameter_counts["external_input_count"]
+                    "required_at_runtime" if (parameter_counts["external_input_count"]
+                                              or parameter_counts["declared_dependency_count"])
                     else "not_evaluated"
                 ),
             }, workspace_id=snapshot.workspace_id, scenario_revision=snapshot.scenario_revision,
-            diagnostics=tuple(diagnostics), error=failures > 0, continuation=continuation,
+            diagnostics=tuple(diagnostics),
+            error=failures > 0 or "blocked" in target_contracts.values(), continuation=continuation,
             diagnostics_section="validation-diagnostics",
         )
 

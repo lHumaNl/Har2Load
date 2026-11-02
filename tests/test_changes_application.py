@@ -149,6 +149,7 @@ def test_old_workspace_is_readable_but_apply_does_not_migrate(tmp_path):
     scenario["schema_version"] = "1.0"
     del scenario["representation_selections"]
     del scenario["parameters"]
+    del scenario["target_extensions"]
     encoded = canonical_bytes(scenario)
     scenario_path.write_bytes(encoded)
     manifest_path = workspace / "manifest.json"
