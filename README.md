@@ -26,18 +26,22 @@ application does not contain an LLM client or contact captured endpoints.
 - Scalar variables, local extractors, precise request bindings and lifecycle checks.
   `validate` checks model contracts and bounded recorded-response evidence; it does
   not run a target system or produce runtime values.
+- Bounded, deterministic scalar correlation candidates, preserving alternative
+  producers and temporal uncertainty; never automatic model changes.
+- Revision-pinned JSON/Markdown variable reports with model provenance, lifecycle,
+  uses, recorded checks, candidate evidence, revision diffs and ungenerated source maps.
 
-**Not implemented yet:** explicit boundary overrides, filters, correlation
-candidates, datasets, expressions, agent-code sources, collection variables, regex/native
-selectors, mandatory variable reports, agent extensions/helpers, both generators,
-export/handoff/redaction,
+**Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
+agent-code sources, collection variables, regex/native selectors, agent extensions/helpers,
+both generators, runnable bundle export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.3.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.4.0a1` writes workspace schema `2.0` with scenario
 schema `1.2`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
 rejected; no workspace is silently migrated.
+Existing `0.3.0a1` workspaces also remain readable/editable without a schema upgrade.
 
 ## Install
 
@@ -224,6 +228,90 @@ Rules and limits:
   available through bounded `inspect --section history`. They are private data.
 - Group membership/order, source IDs, timing settings and execution/target states
   remain fixed in this slice. Arbitrary JSON patches or code execution are not accepted.
+
+## Candidates and evidence reports
+
+```sh
+har2load analyze --workspace workspaces/demo
+har2load inspect --workspace workspaces/demo --section candidates
+har2load inspect --workspace workspaces/demo --section analysis-diagnostics
+har2load report --workspace workspaces/demo --format markdown
+har2load report --workspace workspaces/demo --revision 3 --compare-revision 1
+har2load report --workspace workspaces/demo --output workspaces/report-r3
+```
+
+`analyze` is read-only. Its paginated summary omits captured values and locations;
+explicit `inspect --section candidates` or `analysis` exposes private evidence.
+The `scalar_candidates_v1` profile finds typed scalar equality in recorded sources
+and later requests. It retains alternative producers and all discovered consumers,
+with per-alternative timing status. A response that finishes after a consumer
+starts, or lacks timing, cannot establish temporal availability. Even available
+timing is **not proof of causality**. Short/common values are low-priority evidence,
+not silently accepted correlations. No variables, selectors or bindings are applied.
+
+The bounded profile covers header/cookie response values, JSON scalar leaves and
+whole textual response bodies. Request locations include headers, path segments,
+query values, JSON leaves, forms and whole text bodies. Query/form decoding and path
+percent-decoding are contextual and labeled; numbers, strings, booleans and null
+are not implicitly interchangeable. Unsupported or unresolved representations,
+malformed/missing data and exhausted budgets appear in coverage/diagnostics. There
+is no arbitrary token mining, regex inference, semantic causality inference or
+candidate acceptance/rejection workflow yet. `complete` coverage refers only to
+this bounded profile, not to all possible correlations. Consult `analysis.limits`
+and `analysis.coverage`; a partial result never establishes absence of other matches.
+
+Default budgets: 10,000 enumerated slots, 10,000 JSON nodes, 1,000 candidates,
+10,000 source-consumer links, 1 MiB per text, 4 MiB cumulative scanned UTF-8 text
+and 8 MiB accounted candidate payload. Accounting is deliberately conservative
+(including unmatched producers and repeated view scans). Limits are configurable
+through the Python `AnalysisLimits` API; the CLI uses the versioned defaults.
+When a budget interrupts discovery, a consumer's alternatives are retained as a
+complete set or not published; the undiscovered remainder is unknown. Candidate
+IDs hash source locators, not values; IDs alone do not imply unchanged evidence
+across revisions. Invalid path data does not suppress an independently selected
+query representation.
+
+`report` renders the audited model, not a separate narrative written from memory.
+It includes all scalar declarations, source/generator settings, lifecycle, exact
+uses, author/rationale/evidence, sensitivity annotations, recorded extraction
+results, unreferenced extractors, unresolved candidates, conflicts and diagnostics.
+Each target and source-map entry remains `not_generated`; no JMX/C aliases or
+component locators are fabricated. Unsupported code/helper/dataset features and
+native/runtime verification remain explicit limitations. Source annotations,
+purpose text and captured values are data, never instructions to execute.
+
+The JSON and Markdown pair describes the same pinned revision. Markdown uses
+indented JSON evidence blocks to prevent captured HTML, links or fences becoming
+active markup. The SHA-256 of the **exact complete `report.json` bytes** identifies
+the review artifact; Markdown and the export manifest reference it. Reports do
+not assert that a critic has reviewed them (`review: not_recorded`). Any change to
+revision, report content, analyzer profile or tool version can change this digest.
+
+Without `--output`, the JSON envelope contains a bounded **unredacted** character
+fragment (`--format json|markdown`, `--offset`, `--limit`); follow `continuation`
+unchanged to preserve the revision and comparison baseline. The default diff is
+against the previous **model revision**, or an empty baseline at revision 1—not a
+claim that a previous report file exists. `--compare-revision` selects an earlier
+revision explicitly. Added/changed/removed variables, extractors and bindings are
+reported, including before/after changed declarations and removed locations.
+
+With `--output NEW_DIRECTORY`, Har2Load writes `report.json`, `report.md` and finally
+`manifest.json` with file digests. The directory must not exist; its parent must
+exist. Fragment options cannot be combined with export. The CLI returns metadata,
+not private report values. Files are private (0700 directory/0600 files where the
+platform supports these permissions). **Redaction is OFF**: reports may contain
+credentials and are not safe to publish. Export is not a runnable handoff bundle.
+
+Publication is manifest-last, not atomic directory replacement. A failed write may
+leave an incomplete directory; do not treat directory existence as success or
+retry into it. Preserve it for inspection and use a new destination. If a failure
+occurs after manifest creation, verify all digests before trusting it. Existing
+files/symlinks/manual outputs are never overwritten. Reports are limited to 32 MiB
+per format; exceeding the limit is an explicit `REPORT_LIMIT`, not silent truncation.
+Serialization/rendering stop accumulating output at this budget; it is not a
+guarantee that total process memory stays under 32 MiB.
+Report command success means the report was produced, **not** that its recorded
+checks passed or its target scripts are ready; inspect its independent statuses.
 
 ## Variables, extractors and bindings
 
@@ -509,7 +597,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.3.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.4.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

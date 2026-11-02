@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import cast
 
 from har2load.binding_locations import SourceViews
+from har2load.candidates import CandidateAnalyzer
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
 from har2load.grouping import StepGrouper
 from har2load.importer import HarImporter
@@ -19,6 +20,7 @@ from har2load.presentation import (
     resolve_pointer,
     validate_range,
 )
+from har2load.reporting import ReportBuilder, ReportPublisher
 from har2load.scenario import ChangeSet, ScenarioEditor
 from har2load.serialization import canonical_bytes, metadata_object
 from har2load.workspace import (
@@ -168,7 +170,7 @@ class Application:
         if section in (
             "groups", "diagnostics", "scenario", "history", "conflicts",
             "parameters", "variables", "extractors", "bindings", "extraction-checks",
-            "validation-diagnostics",
+            "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
         ):
             if exchange_id is not None:
                 raise Har2LoadError("VIEW_ARGUMENT_CONFLICT", "This section is workspace-scoped.")
@@ -191,6 +193,11 @@ class Application:
                 value = [record(item) for item in self._validation_findings(
                     snapshot.scenario, capture, cast(list[dict[str, JSONValue]], checks)
                 )]
+            elif section in ("analysis", "candidates", "analysis-diagnostics"):
+                analysis = CandidateAnalyzer().analyze(capture, grouping, snapshot.scenario)
+                value = analysis if section == "analysis" else analysis[
+                    "candidates" if section == "candidates" else "diagnostics"
+                ]
             else:
                 value = [record(item) for item in diagnostics]
         else:
@@ -449,6 +456,92 @@ class Application:
             }, workspace_id=snapshot.workspace_id, scenario_revision=snapshot.scenario_revision,
             diagnostics=tuple(diagnostics), error=failures > 0, continuation=continuation,
             diagnostics_section="validation-diagnostics",
+        )
+
+    def analyze(
+        self, workspace: Path, offset: int = 0, limit: int = 20, revision: int | None = None,
+    ) -> dict[str, JSONValue]:
+        validate_range(offset, limit, MAX_PAGE_ENTRIES)
+        snapshot, capture, grouping = self._load(workspace, revision)
+        analysis = CandidateAnalyzer().analyze(capture, grouping, snapshot.scenario)
+        candidates = cast(list[dict[str, JSONValue]], analysis["candidates"])
+        page: list[JSONValue] = [{
+            "id": item["id"], "knowledge_status": item["knowledge_status"],
+            "priority": item["priority"], "ambiguity": item["ambiguity"],
+            "source_count": len(cast(list[JSONValue], item["sources"])),
+            "consumer_count": len(cast(list[JSONValue], item["consumers"])),
+        } for item in candidates[offset:offset + limit]]
+        continuation: JSONValue = None
+        if offset + len(page) < len(candidates):
+            continuation = {"offset": offset + len(page), "limit": limit,
+                            "revision": snapshot.scenario_revision}
+        return envelope(
+            "analyze", {"profile": analysis["profile"], "coverage": analysis["coverage"],
+                        "limits": analysis["limits"], "candidate_count": len(candidates),
+                        "candidates": page, "offset": offset, "model_changes_applied": False,
+                        "diagnostic_count": len(cast(list[JSONValue], analysis["diagnostics"])),
+                        "diagnostics_view": {"section": "analysis-diagnostics",
+                                             "revision": snapshot.scenario_revision},
+                        "values": "explicit_inspect_only"},
+            workspace_id=snapshot.workspace_id, scenario_revision=snapshot.scenario_revision,
+            continuation=continuation,
+        )
+
+    def report(
+        self, workspace: Path, *, format: str = "json", offset: int = 0,
+        limit: int = MAX_FRAGMENT_CHARACTERS, revision: int | None = None,
+        compare_revision: int | None = None, output: Path | None = None,
+    ) -> dict[str, JSONValue]:
+        validate_range(offset, limit, MAX_FRAGMENT_CHARACTERS)
+        if format not in ("json", "markdown"):
+            raise Har2LoadError("REPORT_FORMAT_INVALID", "Unknown report format.")
+        if output is not None and (offset != 0 or limit != MAX_FRAGMENT_CHARACTERS
+                                   or format != "json"):
+            raise Har2LoadError("REPORT_ARGUMENT_CONFLICT", "Export cannot use fragment options.")
+        snapshot, capture, grouping = self._load(workspace, revision)
+        baseline_revision = compare_revision
+        if baseline_revision is None and snapshot.scenario_revision > 1:
+            baseline_revision = snapshot.scenario_revision - 1
+        if baseline_revision is not None and (
+            type(baseline_revision) is not int
+            or not 1 <= baseline_revision < snapshot.scenario_revision
+        ):
+            raise Har2LoadError("REPORT_BASELINE_INVALID", "Baseline must be an earlier revision.")
+        baseline = (
+            self._load(workspace, baseline_revision)[0] if baseline_revision is not None else None
+        )
+        checks = self._extraction_checks(snapshot.scenario, capture)
+        diagnostics = list(capture.diagnostics + grouping.diagnostics) + self._validation_findings(
+            snapshot.scenario, capture, cast(list[dict[str, JSONValue]], checks)
+        )
+        artifact = ReportBuilder().build(
+            snapshot=snapshot, capture=capture, grouping=grouping, baseline=baseline,
+            checks=checks, diagnostics=[record(item) for item in diagnostics],
+            analysis=CandidateAnalyzer().analyze(capture, grouping, snapshot.scenario),
+            conflicts=self.editor.conflicts(snapshot.scenario, capture),
+        )
+        metadata: dict[str, JSONValue] = {
+            "report_sha256": artifact.digest, "compare_revision": baseline_revision,
+            "redaction": "off", "contains_sensitive_data": True,
+            "privacy_warning": PRIVACY_WARNING, "review": "not_recorded",
+            "statuses": artifact.document["statuses"],
+        }
+        continuation: JSONValue = None
+        if output is not None:
+            metadata.update(ReportPublisher().publish(artifact, output))
+            metadata["write_performed"] = True
+        else:
+            text = (artifact.json_bytes if format == "json" else artifact.markdown_bytes).decode()
+            metadata.update({"content": text[offset:offset + limit], "format": format,
+                             "offset": offset, "total_characters": len(text),
+                             "write_performed": False})
+            if offset + limit < len(text):
+                continuation = {"format": format, "offset": offset + limit, "limit": limit,
+                                "revision": snapshot.scenario_revision,
+                                "compare_revision": baseline_revision}
+        return envelope(
+            "report", metadata, workspace_id=snapshot.workspace_id,
+            scenario_revision=snapshot.scenario_revision, continuation=continuation,
         )
 
 

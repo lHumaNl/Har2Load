@@ -44,6 +44,8 @@ def test_full_cli_cycle_without_site_packages(tmp_path):
         ["import", str(source), "--workspace", str(workspace)],
         ["summary", "--workspace", str(workspace)],
         ["inspect", "--workspace", str(workspace), "--section", "groups"],
+        ["analyze", "--workspace", str(workspace)],
+        ["report", "--workspace", str(workspace)],
     ]:
         run = subprocess.run(
             [sys.executable, "-S", "-m", "har2load", *args], env=env,

@@ -43,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
         "entry", "request", "response", "request-body", "response-body", "groups", "diagnostics",
         "scenario", "history", "conflicts",
         "parameters", "variables", "extractors", "bindings", "extraction-checks",
-        "validation-diagnostics",
+        "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")
@@ -69,6 +69,25 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--offset", type=int, default=0)
     validate.add_argument("--limit", type=int, default=20)
     validate.add_argument("--revision", type=int)
+    analyze = commands.add_parser(
+        "analyze", help="Discover bounded candidates without applying edits"
+    )
+    analyze.add_argument("--workspace", required=True, type=Path)
+    analyze.add_argument("--offset", type=int, default=0)
+    analyze.add_argument("--limit", type=int, default=20)
+    analyze.add_argument("--revision", type=int)
+    report = commands.add_parser(
+        "report", help="Read/export a private revision-pinned evidence report"
+    )
+    report.add_argument("--workspace", required=True, type=Path)
+    report.add_argument("--revision", type=int)
+    report.add_argument("--compare-revision", type=int)
+    report.add_argument("--format", choices=("json", "markdown"), default="json")
+    report.add_argument("--offset", type=int, default=0)
+    report.add_argument("--limit", type=int, default=4096)
+    report.add_argument(
+        "--output", type=Path, help="New directory for JSON/Markdown pair and manifest"
+    )
     return root
 
 
@@ -90,6 +109,13 @@ def main(argv: list[str] | None = None) -> int:
             result = app.validate(args.workspace, args.offset, args.limit, args.revision)
             if result["status"] == "error":
                 exit_code = 3
+        elif operation == "analyze":
+            result = app.analyze(args.workspace, args.offset, args.limit, args.revision)
+        elif operation == "report":
+            result = app.report(
+                args.workspace, format=args.format, offset=args.offset, limit=args.limit,
+                revision=args.revision, compare_revision=args.compare_revision, output=args.output,
+            )
         elif operation == "changes":
             operation = f"changes.{args.action}"
             if args.action == "validate":
