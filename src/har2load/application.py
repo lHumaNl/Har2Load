@@ -24,6 +24,8 @@ from har2load.presentation import (
     validate_range,
 )
 from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
+from har2load.runtime_planning import GenerationPlanner
+from har2load.runtime_types import runtime_document
 from har2load.scenario import ChangeSet, ScenarioEditor
 from har2load.serialization import canonical_bytes, metadata_object
 from har2load.workspace import (
@@ -176,7 +178,7 @@ class Application:
             "parameters", "variables", "extractors", "bindings", "extraction-checks",
             "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
             "target-extensions", "code-blocks", "helpers", "extension-plan",
-            "materialized-requests", "generation-diagnostics",
+            "materialized-requests", "generation-diagnostics", "runtime-plan",
         ):
             if exchange_id is not None:
                 raise Har2LoadError("VIEW_ARGUMENT_CONFLICT", "This section is workspace-scoped.")
@@ -228,6 +230,14 @@ class Application:
                                                       ("jmeter", "loadrunner"))
                 value = {target: [record(d) for d in generated.diagnostics if d.target == target]
                          for target in ("jmeter", "loadrunner")}
+            elif section == "runtime-plan":
+                plan = GenerationPlanner().build(capture, grouping, snapshot.scenario)
+                metadata = {"contains_sensitive_data": True, "redaction": "off",
+                            "privacy_warning": PRIVACY_WARNING}
+                value = {"runtime": (runtime_document(plan.runtime)
+                                     if plan.runtime is not None else None),
+                         "diagnostics": [record(d) for d in plan.diagnostics],
+                         "decisions": list(plan.decisions), "execution": "not_run"}
             else:
                 value = [record(item) for item in diagnostics]
         else:

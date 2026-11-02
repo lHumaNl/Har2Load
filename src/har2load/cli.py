@@ -45,7 +45,7 @@ def parser() -> argparse.ArgumentParser:
         "parameters", "variables", "extractors", "bindings", "extraction-checks",
         "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
         "target-extensions", "code-blocks", "helpers", "extension-plan",
-        "materialized-requests", "generation-diagnostics",
+        "materialized-requests", "generation-diagnostics", "runtime-plan",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")
@@ -91,7 +91,7 @@ def parser() -> argparse.ArgumentParser:
         "--output", type=Path, help="New directory for JSON/Markdown pair and manifest"
     )
     generate = commands.add_parser(
-        "generate", help="Prepare static artifacts; never execute targets"
+        "generate", help="Prepare supported artifacts; never execute targets"
     )
     generate.add_argument("--workspace", required=True, type=Path)
     generate.add_argument("--revision", type=int)

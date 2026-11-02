@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 from har2load.domain import Diagnostic, JSONValue
+from har2load.runtime_types import RuntimePlan
 
 GENERATION_PROFILE = "static_literals_v1"
 MAX_GENERATED_BYTES = 32 * 1024 * 1024
@@ -32,6 +33,7 @@ class RequestPlan:
     groups: tuple[NativeGroup, ...]
     diagnostics: tuple[Diagnostic, ...] = ()
     decisions: tuple[JSONValue, ...] = ()
+    runtime: RuntimePlan | None = None
 
 
 @dataclass(frozen=True)

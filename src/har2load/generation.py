@@ -16,15 +16,17 @@ from har2load.extensions import TargetExtensions
 from har2load.generation_types import GENERATION_PROFILE, RequestPlan, TargetBuild
 from har2load.jmeter import JMeterGenerator
 from har2load.loadrunner import LoadRunnerGenerator
-from har2load.materialization import RequestMaterializer
 from har2load.presentation import record
 from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
+from har2load.runtime_planning import GenerationPlanner
+from har2load.runtime_types import RUNTIME_PROFILE
 from har2load.serialization import canonical_bytes
 from har2load.workspace import WorkspaceSnapshot
 
 TARGETS = ("jmeter", "loadrunner")
 _FILES = {"jmeter/scenario.jmx", "loadrunner/Action.c", "loadrunner/globals.h",
           "loadrunner/vuser_init.c", "loadrunner/vuser_end.c", "loadrunner/README.txt"}
+_PARAMETER_KINDS = {"variable", "initialize", "reset", "extractor", "binding"}
 
 
 def _hash(data: bytes) -> str:
@@ -33,6 +35,43 @@ def _hash(data: bytes) -> str:
 
 def _objects(value: JSONValue) -> list[dict[str, JSONValue]]:
     return cast(list[dict[str, JSONValue]], value)
+
+
+def _map_error() -> Har2LoadError:
+    return Har2LoadError("GENERATION_MAP_INVALID", "Artifact mapping is inconsistent.", 3)
+
+
+def _valid_locator(row: dict[str, JSONValue]) -> bool:
+    locator = row.get("locator")
+    if not isinstance(locator, dict):
+        return False
+    if row.get("target") == "jmeter":
+        path, kind = locator.get("component_path"), locator.get("element_type")
+        return (isinstance(path, list) and bool(path)
+                and all(isinstance(item, str) and bool(item) for item in path)
+                and isinstance(kind, str) and bool(kind))
+    if row.get("target") == "loadrunner":
+        return all(isinstance(locator.get(k), str) and bool(locator[k])
+                   for k in ("marker", "function"))
+    return False
+
+
+def _validate_runtime_maps(
+    baseline: list[dict[str, JSONValue]], mappings: list[JSONValue], statuses: dict[str, JSONValue],
+) -> None:
+    expected = {(r["target"], r["kind"], r["entity_id"]) for r in baseline
+                if r["kind"] in _PARAMETER_KINDS and r["disposition"] != "removed"
+                and statuses.get(cast(str, r["target"])) == "generated"}
+    seen: set[tuple[JSONValue, JSONValue, JSONValue]] = set()
+    for row in _objects(mappings):
+        if row["kind"] not in _PARAMETER_KINDS:
+            continue
+        key = row["target"], row["kind"], row["entity_id"]
+        if key not in expected or key in seen or not _valid_locator(row):
+            raise _map_error()
+        seen.add(key)
+    if seen != expected:
+        raise _map_error()
 
 
 def _target(
@@ -60,10 +99,8 @@ def _mappings(builds: tuple[TargetBuild, ...]) -> list[JSONValue]:
     for build in builds:
         for source in build.source_map:
             path = cast(str, source["artifact"])
-            if path not in build.files:
-                raise Har2LoadError(
-                    "GENERATION_MAP_INVALID", "Artifact mapping is inconsistent.", 3
-                )
+            if path not in build.files or not _valid_locator({**source, "target": build.target}):
+                raise _map_error()
             rows.append({**source, "target": build.target, "status": "generated",
                          "artifact_sha256": _hash(build.files[path])})
     return rows
@@ -71,13 +108,17 @@ def _mappings(builds: tuple[TargetBuild, ...]) -> list[JSONValue]:
 
 def _parameter_map(
     baseline: list[dict[str, JSONValue]], mappings: list[JSONValue], scenario: dict[str, JSONValue],
-    statuses: dict[str, JSONValue],
+    statuses: dict[str, JSONValue], runtime: bool = False,
 ) -> list[JSONValue]:
     result: list[JSONValue] = []
     parameters = cast(dict[str, JSONValue], scenario.get("parameters", {"bindings": []}))
     bindings = {item["id"]: item for item in _objects(parameters["bindings"])}
+    if runtime:
+        _validate_runtime_maps(baseline, mappings, statuses)
     requests = {(item["target"], item["entity_id"]): item for item in _objects(mappings)
                 if item["kind"] == "request"}
+    implementations = {(item["target"], item["kind"], item["entity_id"]): item
+                       for item in _objects(mappings)}
     for row in baseline:
         target = cast(str, row["target"])
         if statuses.get(target) != "generated" or row["disposition"] == "removed":
@@ -85,6 +126,14 @@ def _parameter_map(
                 **row, "reason": "Target blocked" if statuses.get(target) == "blocked"
                 else "Target not requested",
             })
+            continue
+        if runtime:
+            implementation = implementations.get((target, row["kind"], row["entity_id"]))
+            if implementation is None:
+                raise Har2LoadError("GENERATION_MAP_INVALID",
+                                   "Runtime declaration has no artifact mapping.", 3)
+            result.append({**row, **implementation, "disposition": "runtime_emitted",
+                           "reason": "Declared runtime action emitted; native behavior unverified"})
             continue
         if row["kind"] == "binding":
             binding = bindings[row["entity_id"]]
@@ -98,6 +147,20 @@ def _parameter_map(
                 "disposition": "unused" if row["disposition"] == "unused" else "constant_folded",
                 "reason": "Immutable literal folded; no runtime variable/lifecycle action emitted"})
     return result
+
+
+def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValue]) -> None:
+    target_statuses = {target: statuses.get(target, "not_requested") for target in TARGETS}
+    for variable in _objects(document["variables"]):
+        for key in ("lifecycle", "failure_policy"):
+            section = cast(dict[str, JSONValue], variable[key])
+            section["runtime_implementation"] = "target_specific"
+            section["target_implementations"] = target_statuses.copy()
+        failure = cast(dict[str, JSONValue], variable["failure_policy"])
+        failure.update({"failure_wire_policy": "error_marker_json_string_v1",
+                        "marker": "ERROR_" + cast(str, cast(dict[str, JSONValue],
+                                                           variable["declaration"])["name"]),
+                        "marker_is_typed_success": False, "stale_value_reuse": "forbidden"})
 
 
 @dataclass(frozen=True)
@@ -118,7 +181,9 @@ class GenerationBuilder:
                 or any(t not in TARGETS for t in targets)):
             raise Har2LoadError("GENERATION_TARGET_INVALID", "Invalid target selection.", 2)
         selected = tuple(target for target in TARGETS if target in targets)
-        plan = RequestMaterializer().build(capture, grouping, snapshot.scenario)
+        plan = GenerationPlanner().build(capture, grouping, snapshot.scenario)
+        runtime = plan.runtime is not None
+        profile = RUNTIME_PROFILE if runtime else GENERATION_PROFILE
         builds = tuple(_target(target, plan, snapshot.scenario) for target in selected)
         files = {path: data for build in builds for path, data in build.files.items()}
         if any(path not in _FILES for path in files):
@@ -130,7 +195,7 @@ class GenerationBuilder:
         }
         diagnostics = tuple(d for build in builds for d in build.diagnostics)
         document = deepcopy(base_report.document)
-        document["report_schema_version"] = "1.2"
+        document["report_schema_version"] = "1.3" if runtime else "1.2"
         document["targets"] = {target: target_metadata.get(target, {"status": "not_requested"})
                                for target in TARGETS}
         jmeter_generated = statuses.get("jmeter") == "generated"
@@ -154,30 +219,42 @@ class GenerationBuilder:
         }
         maps = _mappings(builds)
         document["source_map"] = _parameter_map(
-            _objects(document["source_map"]), maps, snapshot.scenario, statuses
-        ) + maps
+            _objects(document["source_map"]), maps, snapshot.scenario, statuses, runtime
+        ) + [row for row in maps if not runtime or cast(dict[str, JSONValue], row)["kind"]
+             not in _PARAMETER_KINDS]
+        if runtime:
+            _runtime_report(document, statuses)
         document["generation"] = {
-            "profile": GENERATION_PROFILE, "profile_version": "1", "producer_version": __version__,
+            "profile": profile, "profile_version": "1", "producer_version": __version__,
             "requested_targets": list(selected), "decisions": list(plan.decisions),
             "diagnostics": [record(d) for d in diagnostics],
             "native_artifact_digests": {path: _hash(data) for path, data in sorted(files.items())},
             "native_validation": "not_run", "execution": "not_run", "wire_parity": "unverified",
             "publication": "prepared_artifacts", "contains_sensitive_data": True,
             "limitations": [
-                "Static requests and literal folding only; not the complete dual-target product.",
+                ("Scalar runtime artifacts; not the complete dual-target product." if runtime else
+                 "Static requests and literal folding only; not the complete dual-target product."),
                 "LoadRunner output is C source scaffold, not a verified runnable VuGen project.",
                 "No target process, captured endpoint or native loader was invoked.",
-                "Recorded cookies/authentication and runtime producers require future support.",
+                "Recorded cookies/authentication prerequisites require future support.",
             ],
         }
+        if runtime:
+            generation = cast(dict[str, JSONValue], document["generation"])
+            generation.update({"failure_wire_policy": "error_marker_json_string_v1",
+                               "runtime_validation": "not_run",
+                               "failure_changes_json_type": True,
+                               "success_preserves_declared_type": True})
         report = ReportBuilder().render(document)
         files.update({"report.json": report.json_bytes, "report.md": report.markdown_bytes})
         blocked = any(build.status == "blocked" for build in builds)
         manifest: dict[str, JSONValue] = {
-            "schema_version": "1.0", "kind": "generated_static_artifacts", "status": "complete",
+            "schema_version": "1.0", "kind": (
+                "generated_runtime_artifacts" if runtime else "generated_static_artifacts"),
+            "status": "complete",
             "workspace_id": snapshot.workspace_id, "scenario_revision": snapshot.scenario_revision,
             "capture_sha256": capture.sha256, "model_sha256": document["model_sha256"],
-            "report_sha256": report.digest, "profile": GENERATION_PROFILE,
+            "report_sha256": report.digest, "profile": profile,
             "targets": target_metadata, "generation_status": (
                 "partial" if blocked and any(build.files for build in builds)
                 else "blocked" if blocked else "generated"

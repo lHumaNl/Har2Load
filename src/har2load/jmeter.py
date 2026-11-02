@@ -1,4 +1,4 @@
-"""Independent, offline JMX serializer for the static_literals_v1 profile.
+"""Independent, offline JMX serializer for static and scalar-runtime profiles.
 
 Property contracts were inspected in Apache JMeter rel/v5.5 source; see metadata.
 XML structure is not evidence of native loading, wire parity, or runtime safety.
@@ -9,8 +9,10 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from dataclasses import replace
+from typing import cast
 from urllib.parse import urlsplit
 
+from har2load import jmeter_runtime as runtime
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
     GENERATION_PROFILE,
@@ -20,6 +22,7 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
+from har2load.runtime_types import RUNTIME_PROFILE, RuntimePlan
 
 ARTIFACT = "jmeter/scenario.jmx"
 TARGET = "jmeter"
@@ -55,27 +58,32 @@ class JMeterGenerator:
 
     def generate(self, plan: RequestPlan) -> TargetBuild:
         diagnostics = tuple(replace(item, target=TARGET) for item in plan.diagnostics)
-        metadata = _metadata()
+        metadata = _metadata(plan.runtime)
         if any(item.severity == "error" for item in diagnostics):
             return TargetBuild(TARGET, diagnostics=diagnostics, metadata=metadata)
         try:
             _validate(plan)
+            configs = runtime.prepare(plan.runtime, MAX_GENERATED_BYTES) if plan.runtime else {}
             root, mappings = _document(plan)
+            if plan.runtime is not None:
+                _attach_runtime(root, plan.runtime, configs, mappings)
             data = _serialize(root)
-        except _Rejected as error:
-            diagnostic = Diagnostic(str(error), "error", "Static JMeter generation is blocked.",
+        except (_Rejected, runtime.RuntimeRejected) as error:
+            diagnostic = Diagnostic(str(error), "error", "JMeter generation is blocked.",
                                     target=TARGET)
             return TargetBuild(TARGET, diagnostics=(*diagnostics, diagnostic), metadata=metadata)
         return TargetBuild(TARGET, {ARTIFACT: data}, tuple(mappings), diagnostics, metadata)
 
 
-def _metadata() -> dict[str, JSONValue]:
+def _metadata(runtime_plan: RuntimePlan | None = None) -> dict[str, JSONValue]:
     return {
-        "profile": GENERATION_PROFILE, "profile_version": "1", "artifact_kind": "jmx",
+        "profile": RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE,
+        "profile_version": "1", "artifact_kind": "jmx",
         "compatibility": "unverified", "native_validation": "not_run", "execution": "not_run",
         "intended_baseline": {"jmeter": "5.5", "java": "8"},
-        "sources": [SOURCE_BASE + path for path in SOURCES],
-        "limitations": [
+        "sources": cast(list[JSONValue], [SOURCE_BASE + path for path in SOURCES] + (
+            runtime.SOURCES if runtime_plan else [])),
+        "limitations": cast(list[JSONValue], runtime.LIMITATIONS) if runtime_plan else [
             "Structural XML checks do not establish native compatibility or wire parity.",
             "Static literals only; no runtime bindings, extractors, code, or helper execution.",
             "GET, HEAD, OPTIONS and TRACE bodies are unsupported in this profile.",
@@ -109,12 +117,29 @@ def _validate(plan: RequestPlan) -> None:
     if size > MAX_GENERATED_BYTES:
         raise _Rejected("JMETER_OUTPUT_LIMIT")
     _topology(plan)
-    for value in _captured_strings(plan):
+    for value in _property_strings(plan):
         _literal(value)
     if sum(len(r.body or b"") for r in plan.requests) > MAX_TOTAL_BODY_BYTES:
         raise _Rejected("JMETER_BODY_LIMIT")
     for request in plan.requests:
-        _request_valid(request)
+        _request_valid(request, runtime_plan=plan.runtime is not None)
+    if plan.runtime is not None and [r.id for r in plan.runtime.requests] != [
+        r.id for r in plan.requests
+    ]:
+        raise _Rejected("JMETER_RUNTIME_PLAN_INVALID")
+
+
+def _property_strings(plan: RequestPlan) -> Iterator[str]:
+    if plan.runtime is None:
+        yield from _captured_strings(plan)
+        return
+    for group in plan.groups:
+        yield group.id
+        yield group.name
+    for request in plan.requests:
+        yield request.id
+        yield request.group_id
+        yield request.method
 
 
 def _topology(plan: RequestPlan) -> None:
@@ -139,7 +164,7 @@ def _literal(value: str) -> None:
         raise _Rejected("JMETER_XML_CHARACTER_UNSUPPORTED")
 
 
-def _request_valid(request: NativeRequest) -> None:
+def _request_valid(request: NativeRequest, *, runtime_plan: bool = False) -> None:
     if request.method not in METHODS:
         raise _Rejected("JMETER_METHOD_UNSUPPORTED")
     _url_valid(request.url)
@@ -148,7 +173,9 @@ def _request_valid(request: NativeRequest) -> None:
         if len(request.body) > MAX_BODY_BYTES:
             raise _Rejected("JMETER_BODY_LIMIT")
         try:
-            _literal(request.body.decode("utf-8"))
+            text = request.body.decode("utf-8")
+            if not runtime_plan:
+                _literal(text)
         except UnicodeDecodeError:
             raise _Rejected("JMETER_BODY_ENCODING_UNSUPPORTED") from None
         if request.method not in BODY_METHODS:
@@ -219,7 +246,7 @@ def _document(plan: RequestPlan) -> tuple[ET.Element, list[dict[str, JSONValue]]
     mappings: list[dict[str, JSONValue]] = []
     requests = {request.id: request for request in plan.requests}
     for ordinal, group in enumerate(plan.groups, 1):
-        _group(children, debug_tree, group, ordinal, requests, mappings)
+        _group(children, debug_tree, group, ordinal, requests, mappings, plan.runtime is not None)
     _debug_sampler(debug_tree)
     listener, _ = _component(children, "ResultCollector", "ViewResultsFullVisualizer",
                              "View Results Tree")
@@ -260,7 +287,8 @@ def _debug_sampler(parent: ET.Element) -> None:
 
 
 def _group(parent: ET.Element, debug: ET.Element, group: NativeGroup, ordinal: int,
-           requests: dict[str, NativeRequest], maps: list[dict[str, JSONValue]]) -> None:
+           requests: dict[str, NativeRequest], maps: list[dict[str, JSONValue]],
+           runtime_plan: bool = False) -> None:
     fragment_name = _name("TF", ordinal, group.name)
     fragment, children = _component(parent, "TestFragmentController", "TestFragmentControllerGui",
                                     fragment_name)
@@ -274,7 +302,7 @@ def _group(parent: ET.Element, debug: ET.Element, group: NativeGroup, ordinal: i
     _module(debug, group, ordinal, fragment_name)
     path = [PLAN_NAME, fragment_name, transaction.attrib["testname"]]
     for index, request_id in enumerate(group.exchange_ids, 1):
-        node = _sampler(samplers, requests[request_id], index)
+        node = _sampler(samplers, requests[request_id], index, runtime_plan)
         maps.append(_map("request", request_id, node, path))
 
 
@@ -307,19 +335,61 @@ def _body(sampler: ET.Element, body: bytes | None) -> None:
     _property(argument, "Argument.metadata", "=")
 
 
-def _sampler(parent: ET.Element, request: NativeRequest, ordinal: int) -> ET.Element:
+def _sampler(parent: ET.Element, request: NativeRequest, ordinal: int,
+             runtime_plan: bool = False) -> ET.Element:
     sampler, subtree = _component(parent, "HTTPSamplerProxy", "HttpTestSampleGui",
                                  _name("HTTP", ordinal, request.id))
-    _body(sampler, request.body)
-    _address(sampler, request)
+    _body(sampler, None if runtime_plan else request.body)
+    if runtime_plan:
+        _property(sampler, "HTTPSampler.path", runtime.FAILED_URL)
+        _property(sampler, "HTTPSampler.method", request.method)
+    else:
+        _address(sampler, request)
     _property(sampler, "HTTPSampler.implementation", "HttpClient4")
     _property(sampler, "HTTPSampler.contentEncoding", "UTF-8")
     for name in ("follow_redirects", "auto_redirects", "image_parser", "DO_MULTIPART_POST"):
         _property(sampler, "HTTPSampler." + name, False)
     _property(sampler, "HTTPSampler.use_keepalive", True)
-    if request.headers:
+    if request.headers and not runtime_plan:
         _headers(subtree, request.headers)
     return sampler
+
+
+def _jsr223(parent: ET.Element, kind: str, name: str, config: str) -> ET.Element:
+    node, _ = _component(parent, kind, "TestBeanGUI", name)
+    for key, value in (("scriptLanguage", "groovy"), ("filename", ""),
+                       ("cacheKey", RUNTIME_PROFILE), ("parameters", config),
+                       ("script", runtime.SCRIPT)):
+        _property(node, key, value)
+    return node
+
+
+def _attach_runtime(root: ET.Element, plan: RuntimePlan, configs: dict[tuple[str, str], str],
+                    maps: list[dict[str, JSONValue]]) -> None:
+    branches = {node: tree for branch in root.iter("hashTree")
+                for node, tree in zip(list(branch)[::2], list(branch)[1::2], strict=True)}
+    debug = branches[next(root.iter("ThreadGroup"))]
+    temporary = ET.Element("hashTree")
+    init = _jsr223(temporary, "JSR223Sampler", "Runtime iteration", configs["iteration_start", ""])
+    debug[0:0] = list(temporary)
+    locations = {("iteration_start", ""): [PLAN_NAME, "DebugTG", init.attrib["testname"]]}
+    request_maps = {row["entity_id"]: row for row in maps if row["kind"] == "request"}
+    for sampler in root.iter("HTTPSamplerProxy"):
+        identifier = sampler.find("stringProp[@name='TestPlan.comments']")
+        assert identifier is not None and identifier.text is not None
+        row = request_maps[identifier.text]
+        path = cast(list[str], cast(dict[str, JSONValue], row["locator"])["component_path"])
+        _runtime_processors(branches[sampler], identifier.text, path, configs, locations)
+    maps.extend(runtime.source_maps(plan, locations, ARTIFACT))
+
+
+def _runtime_processors(branch: ET.Element, request_id: str, path: list[str],
+                        configs: dict[tuple[str, str], str],
+                        locations: dict[tuple[str, str], list[str]]) -> None:
+    for event, kind in (("before_request", "JSR223PreProcessor"),
+                        ("after_response", "JSR223PostProcessor")):
+        node = _jsr223(branch, kind, "Runtime " + event, configs[event, request_id])
+        locations[event, request_id] = [*path, node.attrib["testname"]]
 
 
 def _address(sampler: ET.Element, request: NativeRequest) -> None:

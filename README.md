@@ -34,14 +34,17 @@ application does not contain an LLM client or contact captured endpoints.
   dependency/order contracts, source digests and per-target missing-implementation checks.
 - First static/literal generation profile: selected request materialization, structural
   JMX and intermediate LoadRunner C source, per-target capability errors and digest-linked reports.
+- Scalar runtime artifact profile: literal/extracted variables, body JSON/boundary extraction,
+  lifecycle actions and exact request templates, with explicit failure markers and source maps.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
-runtime variable/extractor/code/helper generation, complete verified VuGen projects,
+external/generated source execution, code/helper runtime wrappers, response-header/cookie runtime
+extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.6.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.7.0a1` writes workspace schema `2.0` with scenario
 schema `1.3`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -49,7 +52,7 @@ rejected; no workspace is silently migrated.
 Existing `0.3.0a1`/`0.4.0a1` scenarios 1.2 remain readable/editable with their previous
 operations. Target extensions and `agent_code` require an explicit `upgrade_extensions`
 change to scenario 1.3. Reads never perform this upgrade.
-Existing `0.5.0a1` workspaces are readable/editable without another schema upgrade.
+Existing `0.5.0a1`/`0.6.0a1` workspaces are readable/editable without another schema upgrade.
 
 ## Install
 
@@ -253,7 +256,9 @@ har2load inspect --workspace workspaces/demo --section generation-diagnostics
 `generate` requires either `--check` (render and check in memory, no writes) or
 `--output NEW_DIRECTORY`. `--target` is `both` by default, or `jmeter`/`loadrunner`.
 Both modes are offline and **never execute, compile or natively load artifacts**.
-The profile is `static_literals_v1`, not the complete product support matrix.
+For literal-only models the profile is `static_literals_v1`, not the complete product
+support matrix. Models with extractors/nonliteral declarations select the runtime
+profile described below (and may be blocked by its capability checks).
 
 Supported inputs are HTTP/HTTPS GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, ASCII URLs,
 ASCII headers, and bounded UTF-8 JSON/text/URL-encoded request bodies. Selected
@@ -364,6 +369,128 @@ total body bytes and 8 MiB accumulated materialized request data. Each target ha
 a 32 MiB output budget (combined C files for LoadRunner); report format budgets
 still apply. Limits produce explicit blocked/limit diagnostics, not hidden truncation.
 For long diagnostic lists follow revision-pinned `diagnostics_continuation`.
+
+## Scalar runtime correlation artifacts
+
+The same `generate --check` / `--output NEW_DIRECTORY` commands select
+`scalar_runtime_v1` when a model declares an extractor or a nonliteral variable.
+Literal-only models keep `static_literals_v1` and its preparation-time folding.
+In a runtime plan, **all** variables—including literals—follow their declared
+initialization/reset events. No generated script is executed during preparation.
+
+```sh
+har2load inspect --workspace workspaces/demo --section runtime-plan
+har2load generate --workspace workspaces/demo --check
+har2load generate --workspace workspaces/demo --output workspaces/runtime-r4 --revision 4
+```
+
+`runtime-plan` is private/unredacted, paginated and revision-pinned. It contains
+typed literal/variable segments, not magic placeholders to search for in recorded
+strings. Every binding keeps its model ID and exact location. Bound recorded values
+are not fallback live values. Unbound fields remain capture-derived data.
+
+### Supported declarations and explicit limits
+
+- Sources: `literal` and `extracted`; scalar string, integer, number, boolean and null.
+- Extractors: `response_body` with `json_path_subset_v1` or `boundary_v1`, including
+  explicit cardinality/occurrence and `allow_empty`. Unreferenced extractors are
+  still emitted and checked rather than silently discarded.
+- JSON extraction distinguishes missing from null and strings from numeric tokens.
+  Duplicate keys, invalid Unicode, non-scalar results and resource-limit violations
+  fail extraction; no binary-float conversion is used for decimal values.
+- Boundary extraction follows Har2Load's first-left/nearest-right, non-overlapping
+  algorithm. It is **not** a direct mapping to LoadRunner's last-left native boundary
+  matching. LoadRunner captures the response and uses a controlled scanner.
+- Destinations: exact path/query/form/header/text/JSON locations. JSON success retains
+  scalar type; path/query/form encode only the substituted value. Unchanged encoded
+  occurrences keep their spelling. JSON bodies with bindings are structurally
+  serialized; text spans refer to original character offsets.
+- Runtime binding to Content-Type, Content-Encoding, authentication, cookies or
+  managed/Connection-nominated headers is blocked. Header names remain static.
+  Unsafe live header values become binding error markers, not injected header lines.
+- External/generated/agent-code sources and code/helper wrappers remain unsupported
+  and block generation explicitly—even when unbound. No environment, external file,
+  random generator or authored code is evaluated during preparation.
+- Response-header/cookie runtime extraction is blocked rather than treating native
+  normalized headers or a persistent cookie jar as equivalent to HAR response arrays.
+
+Existing static request prerequisites still apply: unsupported uploads, compression,
+initial recorded authentication/cookies and unresolved request representations are
+not made safe merely by adding runtime variables. Target-specific errors can still
+leave another target's files and diagnostic reports; exit status remains 3 if any
+requested target is blocked.
+
+### Lifecycle and approved failure-wire behavior
+
+Session initialization is per user/thread; iteration initialization repeats per
+iteration. `before_request` / `after_response` initializers remain attached to their
+declared request. Scope reset does not turn initialization into an implicit once-only
+operation. Producer outputs are cleared before another extraction attempt, including
+transport failure paths; there is no previous-iteration or captured-value fallback.
+
+**`error_marker_json_string_v1`:** failed values produce `ERROR_<name>` and explicit
+failure diagnostics while the debug scenario continues. For a failed JSON binding,
+the marker is a **quoted JSON string even when the declared success type is number,
+integer, boolean or null**. This deliberate, owner-approved exception applies only
+to failure. It is not typed success, null/zero substitution, or permission to change
+successful JSON types. A legitimate extracted string equal to `ERROR_<name>` remains
+distinguishable internally from failure.
+
+JMeter marks affected native samples unsuccessful after independent extraction and
+initialization checks finish; preprocessor binding failures are carried to the
+consumer sample. LoadRunner explicitly ends affected transactions with `LR_FAIL`,
+without depending on the optional "Fail open transactions on lr_error_message"
+setting. Failed initialization before a transaction opens is preserved for the first
+group; later consumers of a failed variable also fail their transaction. These marks
+do not abort the remaining requests. Rejection at one header binding does not erase
+an otherwise-valid scalar used by JSON/text/path bindings.
+
+### Native construction and verification boundary
+
+JMeter uses fixed inline cached JSR223 processors and a per-thread state object;
+configuration is encoded data, not interpolated Groovy source. Request fields are
+installed programmatically so captured/live `${...}` is not deliberately evaluated
+as JMeter functions. JSON parsing uses the Jackson Core already bundled with the
+intended JMeter 5.5 distribution, not an automatically downloaded dependency.
+The debug layout, enabled Debug Sampler and View Results Tree remain intact.
+If a whole request field cannot be assembled, the JMeter sampler uses an invalid-URL
+failed-sample sentinel rather than sending a partial/stale request or falling back
+to localhost. This is an explicit safety failure, not an automatically disabled sampler.
+
+LoadRunner emits controlled C parsing/encoding and lifecycle code alongside the
+existing `web_custom_request` scaffold. JSON numeric values are retained without
+`double` conversion; runtime bodies still use non-parameterized RAW_BODY buffers.
+It remains an **incomplete VuGen project** with unknown target version, unverified
+native state isolation and no `.usr`/run-logic template. System C compilation would
+not establish VuGen compatibility.
+
+Both engines are bounded, deliberately conservative profiles—not interchangeable
+general-purpose JSON libraries. Response/body and field limits are 1 MiB, scalar
+values 64 KiB, JSON nesting 64 containers, and boundary matches at most 1000.
+Per-target numeric, Unicode, response decoding and allocation limits are recorded
+in generated target metadata. Limits are not a total process-memory guarantee.
+JMeter accepts strict UTF-8 responses (missing charset is treated as UTF-8), rejects
+other charsets and extraction from unsuccessful HTTP samples, and bounds decimal
+scale to ±65536. Known literal scale violations block preparation. LoadRunner rejects
+embedded NUL, limits parsed response JSON to 4096 nodes and 1024 keys per object,
+and limits response numeric exponents to ±10000. Its request-field preflight uses
+worst-case encoded size for every slot, so a field may be blocked even when expected
+live values are small—for example, three maximum-size JSON slots exceed 1 MiB.
+Native representation details such as numeric spelling/negative zero may differ;
+successful JSON numeric values are not intentionally converted through binary floats.
+
+The runtime report uses schema **1.3**; static generation remains 1.2 and ordinary
+model-only `report` remains 1.1. Runtime maps link each variable, initializer, reset,
+extractor and binding to actual native locations and file hashes; missing, duplicate
+or unexpected declaration mappings refuse publication. Removed mappings remain in
+revision history. Reports disclose failure-wire policy and per-target implementation
+status separately from captured extraction checks.
+
+**Runtime correctness/native compatibility is not certified by these artifacts.**
+Python tests inspect generated structure, data, ordering and contracts; they do not
+execute Groovy/C, load JMeter, invoke VuGen or replay HTTP. `native_validation`,
+`runtime_validation` and execution remain `not_run`. Live debug output may contain
+secrets; redaction is still off. Native acceptance remains a separate explicit step.
 
 ## Candidates and evidence reports
 
@@ -574,8 +701,9 @@ JSON null remains distinct from a missing value. Only
 Checks distinguish `matched`, `missing`, `empty`, `multiple`, `invalid`,
 `type_mismatch`, `unavailable` and `limit_exceeded`. Failures do not reuse an old
 value; output value is null and `failure_marker` records the planned `ERROR_<name>`
-policy. These are stateless captured-fixture checks, **not a runtime reset/continue
-implementation**. Native generators must still implement and test those policies.
+policy. These are stateless captured-fixture checks, **not runtime validation**.
+The scalar runtime generation profile emits separate reset/continue code, with the
+explicit JSON failure-string policy described above; native behavior remains unverified.
 
 `validate` reports model-contract validity separately from captured evidence.
 Missing selector matches and other observed check failures return exit 3.
@@ -612,8 +740,9 @@ destinations. Query and form fields are separate. Unresolved representation
 conflicts affecting a destination block its binding; selections determine which
 URL/form/body/MIME view is addressed. A binding to a Content-Type header discarded
 by a MIME selection is rejected. Source views are derived in memory without
-changing raw bytes. **Bindings are not yet applied to emitted HTTP/native scripts**;
-escaping, substitution and target capability parity remain generator work.
+changing raw bytes. Static generation folds literal bindings; scalar runtime generation
+emits typed templates and native formation code. Their capability limits and unverified
+native parity are separate from accepting a binding into the model.
 
 Limits: 256 variables, 256 extractors, 1024 bindings; 1 MiB UTF-8 per local body/JSON
 check and active textual binding view; 64 JSON containers/path tokens; 256-character
@@ -879,7 +1008,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.6.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.7.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .
