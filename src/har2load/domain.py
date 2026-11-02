@@ -78,7 +78,13 @@ class Grouping:
 class Har2LoadError(Exception):
     """Expected application failure with a safe, data-independent message."""
 
-    def __init__(self, code: str, message: str, exit_code: int = 2) -> None:
+    def __init__(
+        self, code: str, message: str, exit_code: int = 2, *,
+        workspace_id: str | None = None, scenario_revision: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.exit_code = exit_code
+        # Safe snapshot context, captured at rejection rather than reread later.
+        self.workspace_id = workspace_id
+        self.scenario_revision = scenario_revision

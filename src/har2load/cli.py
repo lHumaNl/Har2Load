@@ -35,15 +35,31 @@ def parser() -> argparse.ArgumentParser:
     summary.add_argument("--workspace", required=True, type=Path)
     summary.add_argument("--offset", type=int, default=0)
     summary.add_argument("--limit", type=int, default=20, help="1 to 100 entries")
+    summary.add_argument("--revision", type=int, help="Read an immutable historical revision")
     inspect = commands.add_parser("inspect", help="Read an explicit, unredacted bounded fragment")
     inspect.add_argument("--workspace", required=True, type=Path)
     inspect.add_argument("--exchange", help="Stable exchange ID from summary")
     inspect.add_argument("--section", default="entry", choices=[
         "entry", "request", "response", "request-body", "response-body", "groups", "diagnostics",
+        "scenario", "history", "conflicts",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")
     inspect.add_argument("--limit", type=int, default=4096, help="1 to 4096 characters")
+    inspect.add_argument("--revision", type=int, help="Read an immutable historical revision")
+    changes = commands.add_parser(
+        "changes", help="Validate/apply a typed changeset or inspect history"
+    )
+    actions = changes.add_subparsers(dest="action", required=True)
+    for verb in ("validate", "apply"):
+        action = actions.add_parser(verb)
+        action.add_argument("changeset", type=Path, help="Strict JSON changeset, up to 1 MiB")
+        action.add_argument("--workspace", required=True, type=Path)
+    history = actions.add_parser("history", help="Page through committed change metadata")
+    history.add_argument("--workspace", required=True, type=Path)
+    history.add_argument("--offset", type=int, default=0)
+    history.add_argument("--limit", type=int, default=20)
+    history.add_argument("--revision", type=int)
     return root
 
 
@@ -60,11 +76,20 @@ def main(argv: list[str] | None = None) -> int:
         if operation == "import":
             result = app.import_capture(args.source, args.workspace, args.step_gap_seconds)
         elif operation == "summary":
-            result = app.summary(args.workspace, args.offset, args.limit)
+            result = app.summary(args.workspace, args.offset, args.limit, args.revision)
+        elif operation == "changes":
+            operation = f"changes.{args.action}"
+            if args.action == "validate":
+                result = app.changes_validate(args.workspace, args.changeset)
+            elif args.action == "apply":
+                result = app.changes_apply(args.workspace, args.changeset)
+            else:
+                result = app.changes_history(args.workspace, args.offset, args.limit, args.revision)
         else:
             result = app.inspect(
                 args.workspace, args.exchange, section=args.section,
                 pointer=args.pointer, offset=args.offset, limit=args.limit,
+                revision=args.revision,
             )
     except Har2LoadError as error:
         result = error_response(operation, error)

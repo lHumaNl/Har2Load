@@ -1,7 +1,7 @@
 # Har2Load
 
-Offline HAR inspection and scenario preparation. **Early alpha: the first
-working slice, not a complete load-test generator.**
+Offline HAR inspection and revisioned scenario preparation. **Early alpha,
+not a complete load-test generator.**
 
 Har2Load's intended workflow is one HAR → reviewable scenario model → externally
 assisted parameterization/correlation → JMeter and LoadRunner artifacts. The
@@ -19,15 +19,19 @@ application does not contain an LLM client or contact captured endpoints.
 - Initial grouping by consecutive `entry.comment` annotations, otherwise a
   configurable idle gap (default **5 seconds**, inclusive). Overlap and missing
   timing are diagnosed; no think-time timers are inferred.
-- Private initial workspace, paginated metadata, and bounded selective inspection.
+- Private workspace, immutable revisions, paginated metadata, and bounded selective inspection.
+- Typed changesets for group display names and explicit representation selections;
+  read-only validation, atomic application, audit history, stale-revision protection,
+  and idempotent retries.
 
-**Not implemented yet:** editable scenario revisions, explicit boundary overrides,
-filters, correlation candidates, variables/bindings/datasets, mandatory variable
+**Not implemented yet:** explicit boundary overrides, filters, correlation
+candidates, variables/bindings/datasets, mandatory variable
 reports, agent extensions/helpers, both generators, export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format; this version rejects other producer versions rather than
-silently migrating them.
+interchange format. Version `0.2.0a1` writes workspace schema `2.0` and reads the
+previous `0.1.0a1`/schema `1.0` format **read-only**; unknown versions are rejected.
+No workspace is silently migrated.
 
 ## Install
 
@@ -87,7 +91,9 @@ har2load inspect --workspace workspaces/demo --exchange EXCHANGE_ID --section re
   interpreted body view, not a claim about original wire bytes.
 - Offsets/limits count **characters**, not UTF-8 bytes. The maximum fragment is
   4096 characters, and the CLI enforces a 64 KiB response cap. Follow
-  `continuation` until it is null. All fragments include the capture digest.
+  `continuation` until it is null, including its `revision` as `--revision` on
+  subsequent reads. This pins the view even if another writer publishes changes.
+  All fragments include the capture digest.
 - `--pointer` is an RFC 6901 JSON pointer relative to the selected JSON section;
   `~1` addresses `/`, and `~0` addresses `~`. Body views do not accept pointers.
   Pointers are limited to 256 characters so metadata cannot exhaust the response
@@ -107,19 +113,136 @@ har2load inspect --workspace workspaces/demo --exchange EXCHANGE_ID --section re
   JSON on stdout; help and version are plain text.
 
 Exit codes: `0` operation completed (possibly with source diagnostics), `2` bad
-input/arguments/limits, `3` invalid or unsupported workspace, `4` existing
-destination, `5` I/O failure, `1` unexpected internal failure. Import succeeds for
+input/arguments/limits, `3` invalid or unsupported workspace/changeset,
+`4` existing destination, busy workspace, stale revision or reused change ID,
+`5` I/O failure, `1` unexpected internal failure. Import succeeds for
 diagnosable incomplete entries; this does **not** certify an executable scenario.
+
+## Revisioned changes
+
+First inspect group IDs, source locations and the original conflicts:
+
+```sh
+har2load inspect --workspace workspaces/demo --section groups
+har2load inspect --workspace workspaces/demo --section conflicts
+har2load inspect --workspace workspaces/demo --section scenario
+```
+
+Create a private `edit.json` changeset. Replace the illustrative IDs below with
+actual IDs from your workspace, and use its current `scenario_revision` as
+`base_revision`. Evidence locations are RFC 6901 pointers relative to an exchange.
+
+```json
+{
+  "schema_version": "1.0",
+  "change_id": "name-checkout-step",
+  "base_revision": 1,
+  "author": "local-user",
+  "rationale": "Use a reviewed display name for this recorded step.",
+  "evidence": [{"exchange_id": "EXCHANGE_ID", "location": "/request"}],
+  "operations": [
+    {"op": "rename_group", "group_id": "GROUP_ID", "name": "Checkout"}
+  ]
+}
+```
+
+```sh
+har2load changes validate edit.json --workspace workspaces/demo
+har2load changes apply edit.json --workspace workspaces/demo
+har2load changes history --workspace workspaces/demo --offset 0 --limit 20
+har2load inspect --workspace workspaces/demo --section history
+har2load inspect --workspace workspaces/demo --section groups --revision 1
+```
+
+`validate` writes nothing. It checks the changeset, evidence existence and the
+supported model contracts, **not** HTTP correctness or target readiness. `apply`
+rechecks the current revision under an exclusive writer lock and publishes all
+operations as one new revision, or none. Validation is a preview, not a reservation;
+another writer or storage limits can still prevent a later apply.
+
+Supported operations (unknown keys/operations are rejected):
+
+| Operation | Required fields beyond `op` | Effect |
+|---|---|---|
+| `rename_group` | `group_id`, `name` | Change display name, not identity/order/boundaries |
+| `reset_group_name` | `group_id` | Restore the original captured/heuristic name, even if long |
+| `resolve_representation` | `exchange_id`, `location`, `representation` | Record an explicit source choice |
+| `clear_resolution` | `exchange_id`, `location` | Remove a choice as a new, audited change |
+
+Representation choices must refer to an actual original conflict:
+
+| Conflict `location` | Allowed `representation` |
+|---|---|
+| `/request/queryString` | `url` or `queryString` |
+| `/request/postData/params` | `text` or non-file `params` (multipart reconstruction unsupported) |
+| `/request/postData/mimeType` | `mimeType` or `header` |
+| `/response/content/mimeType` | `mimeType` or `header` |
+
+A `header` choice also requires `header_index`, the **absolute zero-based index**
+in that side's headers array; the selected header must be Content-Type. That field
+is forbidden for other choices. Other conflict locations remain visible but do
+not have a supported selection operation yet.
+
+Selections do not alter `capture.har`, rewrite requests, or certify equivalence.
+Raw inspection and original diagnostics remain unchanged. The scenario and
+`inspect --section conflicts` distinguish `unresolved` from `selected`; summary
+counts both. Future serializers must honor these choices and separately check
+capabilities. `author`, rationale and evidence are declarations, not authenticated
+identity or proof that the decision is correct.
+
+Rules and limits:
+
+- `change_id`: 1–64 ASCII letters/digits/`_`/`.`/`-`, starting with a letter/digit.
+  Repeating **the same document and ID** returns its original `applied_revision`
+  without creating another revision, even after later edits. The response's
+  `scenario_revision` describes the current snapshot. Reusing an ID with different
+  content is a conflict; a new change against a stale base is also a conflict.
+  Stale/reused-ID errors include the workspace ID and revision observed at rejection,
+  including the under-lock recheck. That revision is not a promise that no later
+  writer has committed; inspect it before preparing a new changeset.
+- `author`: nonblank, up to 128 characters; `rationale`: nonblank, up to 4096.
+  Require 1–32 existing evidence references and 1–100 operations. Pointers are
+  limited to 256 characters; new display names to 256. Changeset input: 1 MiB.
+- Undo is another changeset with a **new ID and current base revision**; no
+  history rewriting or generic rollback command exists. Restore an earlier name
+  with `rename_group`, its captured default with `reset_group_name`, or clear/replace
+  a representation selection.
+- History metadata is paginated; full author/rationale/evidence/operations are
+  available through bounded `inspect --section history`. They are private data.
+- Group membership/order, source IDs, timing settings and execution/target states
+  remain fixed in this slice. Arbitrary JSON patches or code execution are not accepted.
 
 ## Preservation and limitations
 
 The workspace contains `capture.har` (original bytes), `scenario.json` (immutable
-initial grouping), and `manifest.json` (version, checksums, explicit redaction-off
-state and privacy warning). The manifest is published last. Failed creation can
-leave an incomplete directory; inspect it
-manually and choose another destination. There is no automatic deletion,
-overwrite, migration, or manual-edit import. Copying the whole workspace does not
-depend on its original absolute path.
+revision 1), `revision-000002-<sha256>.json` and subsequent immutable revision
+objects, and `manifest.json` (version, head pointer, checksums and privacy state).
+Each object contains a scenario snapshot, changeset, timestamp and parent digest.
+The manifest is published last using atomic replacement. Reads verify the chain
+and replay supported model operations to check that the audit matches the model;
+this does not execute captured or agent-authored code.
+
+Failed initial creation can leave an incomplete directory; inspect it manually
+and choose another destination. Failed updates leave the old head readable or
+may have already committed if the error happened after publication. In that case,
+inspect history and **retry the identical changeset/ID**, not a newly named copy.
+Unreferenced revision objects may remain after interrupted writes; reads ignore
+them. No automatic cleanup deletes these files.
+
+Writers coordinate through `.changes.lock`; readers do not acquire it. A crashed
+writer can leave a stale lock. It is **never automatically stolen or deleted**:
+before manually removing it, ensure every writer using that workspace has stopped.
+Use a trusted local filesystem; network-filesystem locking and universal
+power-loss durability are not claimed. Limits: 1000 revisions including the
+initial one, 16 MiB per revision object, 64 MiB total committed revision objects.
+Capture parsing and history verification/replay happen on each read; this is not
+a streaming or large-history performance claim.
+
+Manual edits to persisted files are not imported; no overwrite or automatic
+migration exists. An old schema-1.0 workspace remains readable with this version,
+but cannot be edited. To start revisioned work, explicitly import its archived
+`capture.har` into a **new** workspace. Copying a complete current workspace does
+not depend on its original absolute path.
 
 Raw JSON retains order and duplicates **in arrays** (headers, cookies, query and
 form parameters). Duplicate JSON object keys, non-finite numbers, malformed JSON,
@@ -206,7 +329,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.1.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.2.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .
@@ -215,17 +338,8 @@ python -m pip install --no-index --no-build-isolation --no-deps -e .
 Keep wheelhouses outside the repository, or ensure they are not committed. These
 commands prepare/install artifacts only; they do not execute a load test.
 
-## Legacy converter
+## Previous standalone converter
 
-`main.py` is unchanged and separate from the new package. It still needs
-`tiktoken` and `PyYAML`, may initialize/download tokenizer data even for help, and
-retains its old decoding/filtering behavior. The new package neither imports it
-nor depends on its tokenizer or output format. Legacy installation, if needed:
-
-```sh
-python -m pip install tiktoken PyYAML
-python main.py --input capture.har --output optimized --format json
-```
-
-The legacy `--no-cookies` option is **not sanitization**. Its stdout may include
-URLs and a prompt; that is distinct from the new CLI's JSON envelope.
+The legacy root `main.py` has been removed. Use `har2load` or
+`python -m har2load` as described above. This alpha does not reproduce the old
+JSON/YAML compaction or prompt-generation interface.
