@@ -24,7 +24,9 @@ def test_diagnostics_are_bounded_with_continuation():
     ))
     assert len(result["diagnostics"]) == 10
     assert result["truncated"] is True
-    assert result["data"]["diagnostics_continuation"] == {"section": "diagnostics", "offset": 0}
+    assert result["data"]["diagnostics_continuation"] == {
+        "section": "diagnostics", "offset": 0, "revision": 1,
+    }
     assert len(json.dumps(result)) < 5000
 
 

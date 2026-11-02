@@ -83,7 +83,7 @@ def apply(capture: Capture, document: JSONValue,
 def test_initial_contract_and_legacy_read_only(capture: Capture) -> None:
     scenario = initial(capture)
     assert scenario == {
-        "schema_version": "1.1", "revision": 1, "source_capture": capture.id,
+        "schema_version": "1.2", "revision": 1, "source_capture": capture.id,
         "step_gap_seconds": 5.0, "groups": [{
             "id": StepGrouper().group(capture).groups[0].id,
             "exchange_ids": [capture.exchanges[0].id], "name": " Original ",
@@ -91,8 +91,10 @@ def test_initial_contract_and_legacy_read_only(capture: Capture) -> None:
         "ordered_exchange_ids": [capture.exchanges[0].id], "status": "draft",
         "targets": {"jmeter": "not_generated", "loadrunner": "not_generated"},
         "native_validation": "not_run", "execution": "not_run", "representation_selections": [],
+        "parameters": {"variables": [], "extractors": [], "bindings": []},
     }
-    legacy = {key: value for key, value in scenario.items() if key != "representation_selections"}
+    legacy = {key: value for key, value in scenario.items()
+              if key not in ("representation_selections", "parameters")}
     legacy["schema_version"] = "1.0"
     EDITOR.validate(legacy, capture, StepGrouper().group(capture))
     with pytest.raises(Har2LoadError):
@@ -384,9 +386,7 @@ def test_duplicate_or_unsorted_selections(capture: Capture, duplicate: bool) -> 
 @pytest.mark.parametrize("field,value", [("revision", 2), ("representation_selections", []),
                                         ("groups", []), ("status", "validated")])
 def test_legacy_must_match_exact_initial(capture: Capture, field: str, value: JSONValue) -> None:
-    legacy = initial(capture)
-    legacy["schema_version"] = "1.0"
-    del legacy["representation_selections"]
+    legacy = EDITOR.initial(capture, StepGrouper().group(capture), schema_version="1.0")
     legacy[field] = value
     with pytest.raises(Har2LoadError):
         EDITOR.validate(legacy, capture, StepGrouper().group(capture))

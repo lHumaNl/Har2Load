@@ -3,9 +3,11 @@
 from pathlib import Path
 from typing import cast
 
+from har2load.binding_locations import SourceViews
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
 from har2load.grouping import StepGrouper
 from har2load.importer import HarImporter
+from har2load.parameters import ParameterModel
 from har2load.precision import timing_number
 from har2load.presentation import (
     MAX_FRAGMENT_CHARACTERS,
@@ -69,7 +71,17 @@ class Application:
         if legacy != (snapshot.scenario.get("schema_version") == "1.0"):
             raise Har2LoadError("SCENARIO_INVALID", "Scenario and workspace versions differ.", 3)
         self.editor.validate(snapshot.scenario, capture, grouping)
-        expected = snapshot.scenario if legacy else self.editor.initial(capture, grouping)
+        initial = snapshot.initial_scenario
+        if initial is None:
+            raise Har2LoadError("SCENARIO_INVALID", "Initial scenario is unavailable.", 3)
+        version = initial.get("schema_version")
+        if not isinstance(version, str):
+            raise Har2LoadError("SCENARIO_INVALID", "Initial scenario version is invalid.", 3)
+        expected = self.editor.initial(capture, grouping, schema_version=version)
+        if canonical_bytes(initial) != canonical_bytes(expected):
+            raise Har2LoadError(
+                "SCENARIO_AUDIT_MISMATCH", "Initial scenario differs from source.", 3
+            )
         for event in snapshot.history:
             change = ChangeSet.parse(event["change"])
             expected = self.editor.apply(expected, capture, grouping, change)
@@ -96,6 +108,7 @@ class Application:
     ) -> dict[str, JSONValue]:
         return {
             **self._conflict_counts(capture, scenario),
+            **self._parameter_counts(scenario),
             "capture_id": capture.id,
             "capture_sha256": capture.sha256,
             "capture_bytes": len(capture.raw_bytes),
@@ -152,7 +165,11 @@ class Application:
         metadata: dict[str, JSONValue] = {}
         text: str | None = None
         format_name = "json-text"
-        if section in ("groups", "diagnostics", "scenario", "history", "conflicts"):
+        if section in (
+            "groups", "diagnostics", "scenario", "history", "conflicts",
+            "parameters", "variables", "extractors", "bindings", "extraction-checks",
+            "validation-diagnostics",
+        ):
             if exchange_id is not None:
                 raise Har2LoadError("VIEW_ARGUMENT_CONFLICT", "This section is workspace-scoped.")
             if section == "groups":
@@ -163,6 +180,17 @@ class Application:
                 value = [cast(JSONValue, item) for item in snapshot.history]
             elif section == "conflicts":
                 value = self.editor.conflicts(snapshot.scenario, capture)
+            elif section == "parameters":
+                value = self._parameters(snapshot.scenario)
+            elif section in ("variables", "extractors", "bindings"):
+                value = self._parameters(snapshot.scenario)[section]
+            elif section == "extraction-checks":
+                value = self._extraction_checks(snapshot.scenario, capture)
+            elif section == "validation-diagnostics":
+                checks = self._extraction_checks(snapshot.scenario, capture)
+                value = [record(item) for item in self._validation_findings(
+                    snapshot.scenario, capture, cast(list[dict[str, JSONValue]], checks)
+                )]
             else:
                 value = [record(item) for item in diagnostics]
         else:
@@ -237,6 +265,7 @@ class Application:
         return envelope(
             "changes.validate", {
                 **self._conflict_counts(capture, preview), "change_id": change.change_id,
+                **self._parameter_counts(preview),
                 "base_revision": change.base_revision,
                 "proposed_revision": (
                     applied if applied is not None else snapshot.scenario_revision + 1
@@ -258,6 +287,7 @@ class Application:
         return envelope(
             "changes.apply", {
                 **self._conflict_counts(capture, result.snapshot.scenario),
+                **self._parameter_counts(result.snapshot.scenario),
                 "change_id": change.change_id, "applied_revision": result.applied_revision,
                 "replayed": result.replayed, "write_performed": not result.replayed,
                 "target_readiness": "not_evaluated",
@@ -291,6 +321,134 @@ class Application:
                 "latest_revision": snapshot.latest_revision,
             }, workspace_id=snapshot.workspace_id, scenario_revision=snapshot.scenario_revision,
             continuation=continuation,
+        )
+
+    @staticmethod
+    def _parameters(scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
+        return cast(dict[str, JSONValue], scenario.get("parameters", ParameterModel.empty()))
+
+    def _parameter_counts(self, scenario: dict[str, JSONValue]) -> dict[str, JSONValue]:
+        parameters = self._parameters(scenario)
+        counts: dict[str, JSONValue] = {
+            kind[:-1] + "_count": len(cast(list[JSONValue], parameters[kind]))
+            for kind in ("variables", "extractors", "bindings")
+        }
+        sources = [cast(dict[str, JSONValue], item["source"])["kind"] for item in
+                   cast(list[dict[str, JSONValue]], parameters["variables"])]
+        counts["external_input_count"] = sources.count("external")
+        counts["generated_variable_count"] = sources.count("generated")
+        return counts
+
+    def _extraction_checks(
+        self, scenario: dict[str, JSONValue], capture: Capture,
+    ) -> list[JSONValue]:
+        selections = cast(list[JSONValue], scenario.get("representation_selections", []))
+        parameters = self._parameters(scenario)
+        extractors = cast(list[dict[str, JSONValue]], parameters["extractors"])
+        if not extractors:
+            return []
+        views = SourceViews(capture, selections)
+        body_producers = {cast(str, item["exchange_id"]) for item in extractors
+                          if item["area"] == "response_body"}
+        results = ParameterModel.checks(parameters, views.for_extraction(body_producers))
+        for item in cast(list[dict[str, JSONValue]], results):
+            evidence = cast(dict[str, JSONValue], item["evidence"])
+            item["source_view"] = "captured"
+            if evidence["area"] == "response_body":
+                try:
+                    selected = views.selection(
+                        cast(str, evidence["exchange_id"]), "/response/content/mimeType"
+                    )
+                    if selected is not None:
+                        item["source_view"] = "scenario_selected"
+                except Har2LoadError:
+                    item["source_view"] = "unresolved"
+        return results
+
+    def _temporal_diagnostics(
+        self, scenario: dict[str, JSONValue], capture: Capture,
+    ) -> list[Diagnostic]:
+        parameters = self._parameters(scenario)
+        variables = {item["id"]: item for item in
+                     cast(list[dict[str, JSONValue]], parameters["variables"])}
+        exchanges = {item.id: item for item in capture.exchanges}
+        diagnostics = []
+        for binding in cast(list[dict[str, JSONValue]], parameters["bindings"]):
+            variable = variables[binding["variable_id"]]
+            if cast(dict[str, JSONValue], variable["source"])["kind"] != "extracted":
+                continue
+            producer_id = cast(dict[str, JSONValue], variable["initialize"])["exchange_id"]
+            producer = exchanges[cast(str, producer_id)]
+            consumer = exchanges[cast(str, binding["exchange_id"])]
+            if (producer.end_time is None or consumer.start_time is None
+                    or producer.end_time > consumer.start_time):
+                diagnostics.append(Diagnostic(
+                    "CAPTURE_DEPENDENCY_UNPROVEN", "warning",
+                    "Recorded timing does not prove response availability despite scenario order.",
+                    entity_id=cast(str, binding["id"]),
+                ))
+        return diagnostics
+
+    def _validation_findings(
+        self, scenario: dict[str, JSONValue], capture: Capture, checks: list[dict[str, JSONValue]],
+    ) -> list[Diagnostic]:
+        diagnostics = self._temporal_diagnostics(scenario, capture)
+        for item in checks:
+            if item["status"] == "matched":
+                continue
+            partial = item["status"] in ("unavailable", "limit_exceeded")
+            diagnostics.append(Diagnostic(
+                "CAPTURED_EXTRACTION_UNVERIFIED" if partial else "CAPTURED_EXTRACTION_FAILED",
+                "warning" if partial else "error", "See recorded-response check status.",
+                entity_id=cast(str, item["variable_id"] or item["extractor_id"]),
+            ))
+        conflict_counts = self._conflict_counts(capture, scenario)
+        if conflict_counts["unresolved_conflict_count"]:
+            diagnostics.append(Diagnostic(
+                "SOURCE_REPRESENTATIONS_UNRESOLVED", "warning",
+                "Original representation conflicts remain; target readiness is not established.",
+            ))
+        return diagnostics
+
+    def validate(
+        self, workspace: Path, offset: int = 0, limit: int = 20, revision: int | None = None,
+    ) -> dict[str, JSONValue]:
+        validate_range(offset, limit, MAX_PAGE_ENTRIES)
+        snapshot, capture, _ = self._load(workspace, revision)
+        checks = cast(
+            list[dict[str, JSONValue]], self._extraction_checks(snapshot.scenario, capture)
+        )
+        failures = sum(item["status"] not in ("matched", "unavailable", "limit_exceeded")
+                       for item in checks)
+        unverified = sum(item["status"] in ("unavailable", "limit_exceeded") for item in checks)
+        diagnostics = self._validation_findings(snapshot.scenario, capture, checks)
+        parameter_counts = self._parameter_counts(snapshot.scenario)
+        safe_checks: list[JSONValue] = [
+            {key: item[key] for key in ("variable_id", "extractor_id", "status", "match_count",
+                                       "failure_marker", "verification", "source_view",
+                                       "check_kind")}
+            for item in checks[offset:offset + limit]
+        ]
+        continuation: JSONValue = None
+        if offset + len(safe_checks) < len(checks):
+            continuation = {"offset": offset + len(safe_checks), "limit": limit,
+                            "revision": snapshot.scenario_revision}
+        return envelope(
+            "validate", {
+                **parameter_counts, **self._conflict_counts(capture, snapshot.scenario),
+                "model_contract": "valid", "captured_failures": failures,
+                "captured_unverified": unverified, "check_count": len(checks),
+                "checked_extractor_count": len({item["extractor_id"] for item in checks}),
+                "checks": safe_checks, "offset": offset,
+                "validation_scope": "model_contract_and_recorded_extractors",
+                "target_readiness": "not_evaluated", "native_validation": "not_run",
+                "execution": "not_run", "runtime_inputs": (
+                    "required_at_runtime" if parameter_counts["external_input_count"]
+                    else "not_evaluated"
+                ),
+            }, workspace_id=snapshot.workspace_id, scenario_revision=snapshot.scenario_revision,
+            diagnostics=tuple(diagnostics), error=failures > 0, continuation=continuation,
+            diagnostics_section="validation-diagnostics",
         )
 
 

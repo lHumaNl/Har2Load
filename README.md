@@ -23,15 +23,21 @@ application does not contain an LLM client or contact captured endpoints.
 - Typed changesets for group display names and explicit representation selections;
   read-only validation, atomic application, audit history, stale-revision protection,
   and idempotent retries.
+- Scalar variables, local extractors, precise request bindings and lifecycle checks.
+  `validate` checks model contracts and bounded recorded-response evidence; it does
+  not run a target system or produce runtime values.
 
 **Not implemented yet:** explicit boundary overrides, filters, correlation
-candidates, variables/bindings/datasets, mandatory variable
-reports, agent extensions/helpers, both generators, export/handoff/redaction,
+candidates, datasets, expressions, agent-code sources, collection variables, regex/native
+selectors, mandatory variable reports, agent extensions/helpers, both generators,
+export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.2.0a1` writes workspace schema `2.0` and reads the
-previous `0.1.0a1`/schema `1.0` format **read-only**; unknown versions are rejected.
-No workspace is silently migrated.
+interchange format. Version `0.3.0a1` writes workspace schema `2.0` with scenario
+schema `1.2`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
+their previous edits; parameters require an explicit `upgrade_parameters` change.
+The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
+rejected; no workspace is silently migrated.
 
 ## Install
 
@@ -105,6 +111,10 @@ har2load inspect --workspace workspaces/demo --exchange EXCHANGE_ID --section re
   or valid base64 empty bodies are `empty` regardless of MIME. An unknown encoding
   with an empty recorded string is not assumed to describe an empty decoded body.
   Inspect the raw entry for recorded data.
+- `validate` never includes extracted values in its default output. To inspect
+  private recorded values explicitly, use `inspect --section extraction-checks`.
+  If validation diagnostics are truncated, follow `diagnostics_continuation`
+  (section `validation-diagnostics`) with its pinned revision.
 - Import/summary include at most ten diagnostics. `diagnostic_count` and
   `diagnostics_continuation` identify remaining diagnostics; inspect that section
   to page through all of them. Top-level `truncated` also reflects this omission.
@@ -168,6 +178,9 @@ Supported operations (unknown keys/operations are rejected):
 | `reset_group_name` | `group_id` | Restore the original captured/heuristic name, even if long |
 | `resolve_representation` | `exchange_id`, `location`, `representation` | Record an explicit source choice |
 | `clear_resolution` | `exchange_id`, `location` | Remove a choice as a new, audited change |
+| `upgrade_parameters` | none | Explicitly upgrade scenario 1.1 to 1.2 within a revision |
+| `upsert_variable` / `upsert_extractor` / `upsert_binding` | `variable` / `extractor` / `binding` | Add or replace a complete typed declaration |
+| `remove_variable` / `remove_extractor` / `remove_binding` | `id` | Remove a declaration without cascading deletion |
 
 Representation choices must refer to an actual original conflict:
 
@@ -211,6 +224,173 @@ Rules and limits:
   available through bounded `inspect --section history`. They are private data.
 - Group membership/order, source IDs, timing settings and execution/target states
   remain fixed in this slice. Arbitrary JSON patches or code execution are not accepted.
+
+## Variables, extractors and bindings
+
+New scenarios contain `parameters: {variables: [], extractors: [], bindings: []}`.
+All three lists use globally unique IDs; variable names are unique too. IDs/names
+use ASCII `[A-Za-z_][A-Za-z0-9_]{0,63}`. Upserts replace the full declaration and store
+the changeset's `change_id` as provenance. Final-batch validation permits adding
+bindings before their referenced variable/extractor in the same batch. Removing
+referenced objects without repairing/removing their consumers rejects the whole batch.
+
+For an existing scenario 1.1, put `{"op":"upgrade_parameters"}` before parameter
+operations in a normal changeset. This creates an audited new revision, preserving
+existing group names, selections, all old revisions and the original capture.
+It is not an in-place rewrite of old snapshots. An older CLI may reject the newer
+producer marker after any write; use this version for historical reads.
+
+Example `operations` array: replace `PRODUCER_ID` and `CONSUMER_ID` with recorded
+exchange IDs and include the usual changeset author/rationale/evidence fields.
+The consumer must contain a numeric `orderId` in its JSON request body.
+
+```json
+[
+  {
+    "op": "upsert_extractor",
+    "extractor": {
+      "id": "ext_order", "exchange_id": "PRODUCER_ID", "area": "response_body",
+      "selector": {"dialect": "json_path_subset_v1", "expression": "$.id"},
+      "cardinality": "exactly_one", "allow_empty": false,
+      "on_failure": "mark_error_and_continue"
+    }
+  },
+  {
+    "op": "upsert_variable",
+    "variable": {
+      "id": "var_order", "name": "order_id", "value_type": "integer",
+      "source": {"kind": "extracted", "extractor_id": "ext_order"},
+      "initialize": {"event": "after_response", "exchange_id": "PRODUCER_ID"},
+      "scope": "iteration", "reset": "iteration_start",
+      "purpose": "Order identifier returned by the creation request", "sensitive": false
+    }
+  },
+  {
+    "op": "upsert_binding",
+    "binding": {
+      "id": "bind_order", "variable_id": "var_order", "exchange_id": "CONSUMER_ID",
+      "location": {"area": "request_json", "pointer": "/orderId"}
+    }
+  }
+]
+```
+
+```sh
+har2load changes validate parameters.json --workspace workspaces/demo
+har2load changes apply parameters.json --workspace workspaces/demo
+har2load validate --workspace workspaces/demo
+har2load inspect --workspace workspaces/demo --section parameters
+har2load inspect --workspace workspaces/demo --section extraction-checks
+```
+
+### Sources and lifecycle
+
+Scalar types: `string`, `integer`, `number`, `boolean`, `null`. Booleans are not
+numbers; integral JSON numbers can satisfy `integer`. No implicit string-to-number
+conversion, HTML entity decoding or collection transformation is performed.
+
+Supported source objects:
+
+- `{"kind":"literal","value":7}` — must match the declared scalar type.
+- `{"kind":"external","key":"API_TOKEN","allow_empty":false}` — declares a
+  runtime prerequisite; preparation never reads the environment or a secrets file.
+- `{"kind":"extracted","extractor_id":"ext_order"}` — a recorded producer.
+- `{"kind":"generated","generator":"integer","minimum":1,"maximum":100}` —
+  inclusive bounds; declaration only.
+- `{"kind":"generated","generator":"string","length":12,"alphabet":"abc123"}` —
+  distinct printable ASCII alphabet, length 1–4096.
+- `{"kind":"generated","generator":"uuid"}`.
+- `{"kind":"generated","generator":"utc_datetime","offset_seconds":0,"format":"iso8601"}`.
+- `{"kind":"generated","generator":"utc_date_range","minimum":"2026-01-01","maximum":"2026-12-31","format":"iso8601"}`.
+
+Generated sources are **not evaluated during preparation**. Their future native
+implementations, parity and runtime formatting remain unverified. `purpose` is a
+required nonblank explanation (up to 1024 characters), and `sensitive` is a required
+boolean annotation—not automatic redaction.
+
+Initialization events are `session_start`, `iteration_start`, `before_request`
+and `after_response`; the latter two also require `exchange_id`. The initializer
+repeats at **each occurrence** of that event, not at every substitution. Scope
+controls visibility/reset and does not imply a hidden once-only initialization:
+
+| `scope` | Required `reset` | Constraints |
+|---|---|---|
+| `session` | `session_start` | Values visible through the session; initializer still explicit |
+| `iteration` | `iteration_start` | Cannot initialize only at session start |
+| `request` | `before_request` | Initialize before the same request as every consumer |
+
+Extracted variables initialize `after_response` at their extractor's producer,
+with session/iteration scope. Every binding consumes a saved value before its
+request. Unknown references and use-before-initialization reject the batch; no
+previous-iteration fallback is assumed. Recorded timing is checked separately:
+overlap or unknown completion generates `CAPTURE_DEPENDENCY_UNPROVEN`, not a claim
+that the capture proves causality. The scenario remains sequential.
+
+### Extraction profile and checks
+
+- `response_body` + `json_path_subset_v1`: `$`, dot field names, canonical array
+  indices and JSON double-quoted bracket keys (for example `$["a.b"][0]`). No
+  wildcard, filter, script or fallback regex engine.
+- `response_body` + `boundary_v1`: nonempty literal `left`/`right` delimiters,
+  nearest pairs left-to-right, case-sensitive and non-overlapping.
+- `response_headers` or `response_cookies` + `name_v1`: selector `name`; headers
+  are case-insensitive, cookies case-sensitive; duplicate order is preserved.
+
+Every extractor declares `cardinality: "exactly_one"`, or `"occurrence"` with an
+explicit **1-based** positive `occurrence`. `allow_empty` governs empty strings;
+JSON null remains distinct from a missing value. Only
+`on_failure: "mark_error_and_continue"` is currently accepted.
+
+Checks distinguish `matched`, `missing`, `empty`, `multiple`, `invalid`,
+`type_mismatch`, `unavailable` and `limit_exceeded`. Failures do not reuse an old
+value; output value is null and `failure_marker` records the planned `ERROR_<name>`
+policy. These are stateless captured-fixture checks, **not a runtime reset/continue
+implementation**. Native generators must still implement and test those policies.
+
+`validate` reports model-contract validity separately from captured evidence.
+Missing selector matches and other observed check failures return exit 3.
+Unavailable recorded sources and resource-limit results are explicitly unverified
+warnings; external inputs remain required at
+runtime, not fabricated values. Matching a recorded value does not certify a
+future response, business success, target compatibility or a safe load test.
+Actual values are omitted from default validation output, even when `sensitive`
+is false. Explicit extraction inspection is private/unredacted and identifies
+whether the body view uses a scenario-selected representation.
+
+Every declared extractor is checked, including extractors not yet referenced by
+a variable. Such rows have `check_kind: "extractor"`, `variable_id: null` and no
+variable-specific failure marker. Referenced extractors are evaluated once, then
+receive per-variable type checks (`check_kind: "variable"`). `check_count` counts
+these rows; `checked_extractor_count` counts distinct declarations. Only declared
+body producers receive body projections; headers/cookies use their recorded arrays.
+
+### Request destinations and limits
+
+Binding `location` is one of:
+
+- `request_json` with RFC 6901 `pointer`: existing scalar value, compatible type.
+- `request_query`, `request_header`, `request_form` with **zero-based absolute**
+  `index` in the selected ordered representation, not an occurrence by name.
+- `request_path` with zero-based `index`: split the URL path on `/`, omit only
+  the initial slash separator, retain internal/trailing empty segments.
+- `request_text` with `start`/`end`: half-open character offsets in UTF-8 text
+  bodies (`text/*`), including explicit empty-span insertion.
+
+Duplicate/overlapping destinations are rejected. JSON bindings cannot silently
+turn recorded numbers into quoted strings; null is accepted only for JSON
+destinations. Query and form fields are separate. Unresolved representation
+conflicts affecting a destination block its binding; selections determine which
+URL/form/body/MIME view is addressed. A binding to a Content-Type header discarded
+by a MIME selection is rejected. Source views are derived in memory without
+changing raw bytes. **Bindings are not yet applied to emitted HTTP/native scripts**;
+escaping, substitution and target capability parity remain generator work.
+
+Limits: 256 variables, 256 extractors, 1024 bindings; 1 MiB UTF-8 per local body/JSON
+check and active textual binding view; 64 JSON containers/path tokens; 256-character
+selectors/delimiters; 1000 matches. Overflow is unverified, not a truncated success.
+Literal strings are limited to 65536 characters. Unknown source/selector dialects
+are rejected, not silently approximated. Dataset/expression/agent-code/collection
+support and the bounded regex profile remain future work in the full specification.
 
 ## Preservation and limitations
 
@@ -329,7 +509,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.2.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.3.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

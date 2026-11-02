@@ -80,6 +80,7 @@ class WorkspaceSnapshot:
     head_sha256: str | None = None
     history: tuple[dict[str, JSONValue], ...] = ()
     latest_revision: int = 1
+    initial_scenario: dict[str, JSONValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,7 @@ class WorkspaceStore:
         return WorkspaceSnapshot(
             workspace_id, 1, digest, raw_bytes, metadata_object(scenario_bytes),
             initial_scenario_sha256=_hash(scenario_bytes),
+            initial_scenario=metadata_object(scenario_bytes),
         )
 
     @staticmethod
@@ -221,8 +223,8 @@ class WorkspaceStore:
             not _valid_digest(digest) or not _valid_digest(scenario_digest)
             or manifest.get("workspace_id") != f"ws_{digest}"
             or not _positive_revision(manifest.get("scenario_revision"))
-            or manifest.get("producer_version") != (
-                "0.1.0a1" if version == "1.0" else __version__
+            or manifest.get("producer_version") not in (
+                ("0.1.0a1",) if version == "1.0" else ("0.2.0a1", __version__)
             )
             or manifest.get("redaction") != "off"
             or manifest.get("contains_sensitive_data") is not True
@@ -259,11 +261,12 @@ class WorkspaceStore:
             raise _invalid()
         if latest == 1 and manifest["scenario_sha256"] != initial_digest:
             raise _integrity()
+        initial_scenario = scenario
         scenario, head, history = self._history(path, manifest, selected, scenario)
         return WorkspaceSnapshot(
             cast(str, manifest["workspace_id"]), selected, cast(str, manifest["capture_sha256"]),
             raw, scenario, cast(str, manifest["schema_version"]), initial_digest, head,
-            history, latest,
+            history, latest, initial_scenario,
         )
 
     @staticmethod
@@ -439,6 +442,7 @@ class WorkspaceStore:
         manifest.update({
             "scenario_revision": revision, "head_sha256": digest,
             "scenario_sha256": _hash(canonical_bytes(event["scenario"])),
+            "producer_version": __version__,
         })
         pending = path / f".manifest-{uuid4().hex}.pending"
         try:

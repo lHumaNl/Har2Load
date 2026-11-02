@@ -73,6 +73,7 @@ def envelope(
     *,
     workspace_id: str | None = None,
     scenario_revision: int | None = 1,
+    diagnostics_section: str = "diagnostics",
     diagnostics: tuple[Diagnostic, ...] = (),
     continuation: JSONValue = None,
     error: bool = False,
@@ -81,7 +82,9 @@ def envelope(
         data = {
             **data,
             "diagnostics_truncated": True,
-            "diagnostics_continuation": {"section": "diagnostics", "offset": 0},
+            "diagnostics_continuation": {
+                "section": diagnostics_section, "offset": 0, "revision": scenario_revision,
+            },
         }
     return {
         "schema_version": "1.0",

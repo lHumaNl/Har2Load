@@ -32,7 +32,9 @@ class Body:
     encoding: str | None = None
     representation: Literal["text", "params", "none"] = "none"
     diagnostics: tuple[Diagnostic, ...] = ()
-    view_status: Literal["available", "unavailable", "unsupported", "nontext", "invalid"] = (
+    view_status: Literal[
+        "available", "unavailable", "unsupported", "nontext", "invalid", "limit_exceeded"
+    ] = (
         "unavailable"
     )
 

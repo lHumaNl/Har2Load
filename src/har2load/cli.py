@@ -42,6 +42,8 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--section", default="entry", choices=[
         "entry", "request", "response", "request-body", "response-body", "groups", "diagnostics",
         "scenario", "history", "conflicts",
+        "parameters", "variables", "extractors", "bindings", "extraction-checks",
+        "validation-diagnostics",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")
@@ -60,6 +62,13 @@ def parser() -> argparse.ArgumentParser:
     history.add_argument("--offset", type=int, default=0)
     history.add_argument("--limit", type=int, default=20)
     history.add_argument("--revision", type=int)
+    validate = commands.add_parser(
+        "validate", help="Check model contracts and recorded extractions"
+    )
+    validate.add_argument("--workspace", required=True, type=Path)
+    validate.add_argument("--offset", type=int, default=0)
+    validate.add_argument("--limit", type=int, default=20)
+    validate.add_argument("--revision", type=int)
     return root
 
 
@@ -77,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
             result = app.import_capture(args.source, args.workspace, args.step_gap_seconds)
         elif operation == "summary":
             result = app.summary(args.workspace, args.offset, args.limit, args.revision)
+        elif operation == "validate":
+            result = app.validate(args.workspace, args.offset, args.limit, args.revision)
+            if result["status"] == "error":
+                exit_code = 3
         elif operation == "changes":
             operation = f"changes.{args.action}"
             if args.action == "validate":
