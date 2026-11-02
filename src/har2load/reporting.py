@@ -188,7 +188,8 @@ def _source_map(
                         "entity_id": record["id"], "kind": action, "target": target,
                         "status": "not_generated", "artifact": None, "locator": None,
                         "disposition": "removed" if deleted else "unused" if unused else "declared",
-                        "reason": "Removed from model" if deleted else "No native generator yet",
+                        "reason": ("Removed from model" if deleted
+                                   else "Not generated for this report"),
                     })
     return rows
 
@@ -217,7 +218,7 @@ def _extension_map(extensions: dict[str, JSONValue], diff: dict[str, JSONValue])
                 "disposition": ("removed" if deleted else "unused"
                                 if kind == "helpers" and item["id"] not in used else "declared"),
                 "reason": ("No longer declared on this target" if deleted
-                           else "No native generator yet"),
+                           else "Not generated for this report"),
             }
             rows.append({**base, "kind": "code_block" if kind == "blocks" else "helper_definition"})
             if kind == "blocks":
@@ -401,6 +402,10 @@ class ReportBuilder:
                 "No independent review is implied by this automatically generated report.",
             ],
         }
+        return self.render(document)
+
+    def render(self, document: dict[str, JSONValue]) -> ReportArtifact:
+        """Render one complete document; generation can attach artifacts before hashing."""
         output = _Output()
         for chunk in _json_chunks(document):
             output.write(chunk)
@@ -442,7 +447,8 @@ completion marker, not directory existence. No automatic cleanup of user files.
 """
 
     @staticmethod
-    def _write(path: Path, data: bytes) -> None:
+    def write_file(path: Path, data: bytes) -> None:
+        """Write an exclusively created private artifact; shared by artifact publishers."""
         with path.open("xb") as stream:
             path.chmod(0o600)
             stream.write(data)
@@ -468,9 +474,9 @@ completion marker, not directory existence. No automatic cleanup of user files.
                       "report.md": _digest(artifact.markdown_bytes)},
         }
         try:
-            self._write(destination / "report.json", artifact.json_bytes)
-            self._write(destination / "report.md", artifact.markdown_bytes)
-            self._write(destination / "manifest.json", canonical_bytes(manifest))
+            self.write_file(destination / "report.json", artifact.json_bytes)
+            self.write_file(destination / "report.md", artifact.markdown_bytes)
+            self.write_file(destination / "manifest.json", canonical_bytes(manifest))
         except OSError:
             raise Har2LoadError(
                 "REPORT_WRITE_FAILED", "Report write failed; preserve partial output and use a new"

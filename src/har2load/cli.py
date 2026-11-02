@@ -45,6 +45,7 @@ def parser() -> argparse.ArgumentParser:
         "parameters", "variables", "extractors", "bindings", "extraction-checks",
         "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
         "target-extensions", "code-blocks", "helpers", "extension-plan",
+        "materialized-requests", "generation-diagnostics",
     ])
     inspect.add_argument("--pointer", default="", help="RFC 6901 pointer relative to selected JSON")
     inspect.add_argument("--offset", type=int, default=0, help="Character offset, not byte offset")
@@ -89,6 +90,15 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--output", type=Path, help="New directory for JSON/Markdown pair and manifest"
     )
+    generate = commands.add_parser(
+        "generate", help="Prepare static artifacts; never execute targets"
+    )
+    generate.add_argument("--workspace", required=True, type=Path)
+    generate.add_argument("--revision", type=int)
+    generate.add_argument("--target", choices=("both", "jmeter", "loadrunner"), default="both")
+    destination = generate.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--check", action="store_true", help="Render/check without writing")
+    destination.add_argument("--output", type=Path, help="New private output directory")
     return root
 
 
@@ -117,6 +127,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace, format=args.format, offset=args.offset, limit=args.limit,
                 revision=args.revision, compare_revision=args.compare_revision, output=args.output,
             )
+        elif operation == "generate":
+            result = app.generate(
+                args.workspace, output=args.output, revision=args.revision,
+                targets=("jmeter", "loadrunner") if args.target == "both" else (args.target,),
+            )
+            if result["status"] == "error":
+                exit_code = 3
         elif operation == "changes":
             operation = f"changes.{args.action}"
             if args.action == "validate":

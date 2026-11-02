@@ -7,8 +7,10 @@ from har2load.binding_locations import SourceViews
 from har2load.candidates import CandidateAnalyzer
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
 from har2load.extensions import TargetExtensions
+from har2load.generation import GenerationArtifact, GenerationBuilder, GenerationPublisher
 from har2load.grouping import StepGrouper
 from har2load.importer import HarImporter
+from har2load.materialization import RequestMaterializer
 from har2load.parameters import ParameterModel
 from har2load.precision import timing_number
 from har2load.presentation import (
@@ -21,7 +23,7 @@ from har2load.presentation import (
     resolve_pointer,
     validate_range,
 )
-from har2load.reporting import ReportBuilder, ReportPublisher
+from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
 from har2load.scenario import ChangeSet, ScenarioEditor
 from har2load.serialization import canonical_bytes, metadata_object
 from har2load.workspace import (
@@ -174,6 +176,7 @@ class Application:
             "parameters", "variables", "extractors", "bindings", "extraction-checks",
             "validation-diagnostics", "analysis", "candidates", "analysis-diagnostics",
             "target-extensions", "code-blocks", "helpers", "extension-plan",
+            "materialized-requests", "generation-diagnostics",
         ):
             if exchange_id is not None:
                 raise Har2LoadError("VIEW_ARGUMENT_CONFLICT", "This section is workspace-scoped.")
@@ -209,6 +212,22 @@ class Application:
                     value = extensions
                 else:
                     value = extensions["blocks" if section == "code-blocks" else "helpers"]
+            elif section == "materialized-requests":
+                plan = RequestMaterializer().build(capture, grouping, snapshot.scenario)
+                value = {"complete": not any(d.severity == "error" for d in plan.diagnostics),
+                         "diagnostics": [record(d) for d in plan.diagnostics],
+                         "decisions": list(plan.decisions), "requests": [{
+                             "id": item.id, "group_id": item.group_id, "method": item.method,
+                             "url": item.url, "headers": [{"name": name, "value": value}
+                                                           for name, value in item.headers],
+                             "body": item.body.decode("utf-8") if item.body is not None else None,
+                             "body_kind": item.body_kind,
+                         } for item in plan.requests]}
+            elif section == "generation-diagnostics":
+                generated = self._generation_artifact(workspace, snapshot, capture, grouping,
+                                                      ("jmeter", "loadrunner"))
+                value = {target: [record(d) for d in generated.diagnostics if d.target == target]
+                         for target in ("jmeter", "loadrunner")}
             else:
                 value = [record(item) for item in diagnostics]
         else:
@@ -553,16 +572,7 @@ class Application:
         baseline = (
             self._load(workspace, baseline_revision)[0] if baseline_revision is not None else None
         )
-        checks = self._extraction_checks(snapshot.scenario, capture)
-        diagnostics = list(capture.diagnostics + grouping.diagnostics) + self._validation_findings(
-            snapshot.scenario, capture, cast(list[dict[str, JSONValue]], checks)
-        )
-        artifact = ReportBuilder().build(
-            snapshot=snapshot, capture=capture, grouping=grouping, baseline=baseline,
-            checks=checks, diagnostics=[record(item) for item in diagnostics],
-            analysis=CandidateAnalyzer().analyze(capture, grouping, snapshot.scenario),
-            conflicts=self.editor.conflicts(snapshot.scenario, capture),
-        )
+        artifact = self._report_artifact(snapshot, capture, grouping, baseline)
         metadata: dict[str, JSONValue] = {
             "report_sha256": artifact.digest, "compare_revision": baseline_revision,
             "redaction": "off", "contains_sensitive_data": True,
@@ -585,6 +595,54 @@ class Application:
         return envelope(
             "report", metadata, workspace_id=snapshot.workspace_id,
             scenario_revision=snapshot.scenario_revision, continuation=continuation,
+        )
+
+    def _report_artifact(
+        self, snapshot: WorkspaceSnapshot, capture: Capture, grouping: Grouping,
+        baseline: WorkspaceSnapshot | None,
+    ) -> ReportArtifact:
+        checks = self._extraction_checks(snapshot.scenario, capture)
+        diagnostics = list(capture.diagnostics + grouping.diagnostics) + self._validation_findings(
+            snapshot.scenario, capture, cast(list[dict[str, JSONValue]], checks)
+        )
+        return ReportBuilder().build(
+            snapshot=snapshot, capture=capture, grouping=grouping, baseline=baseline,
+            checks=checks, diagnostics=[record(item) for item in diagnostics],
+            analysis=CandidateAnalyzer().analyze(capture, grouping, snapshot.scenario),
+            conflicts=self.editor.conflicts(snapshot.scenario, capture),
+        )
+
+    def generate(
+        self, workspace: Path, *, output: Path | None = None, revision: int | None = None,
+        targets: tuple[str, ...] = ("jmeter", "loadrunner"),
+    ) -> dict[str, JSONValue]:
+        snapshot, capture, grouping = self._load(workspace, revision)
+        artifact = self._generation_artifact(workspace, snapshot, capture, grouping, targets)
+        if output is not None:
+            GenerationPublisher().publish(artifact, output)
+        result = envelope(
+            "generate", {**artifact.manifest, "write_performed": output is not None,
+                         "diagnostic_count": len(artifact.diagnostics),
+                         "diagnostics_complete_in": "report.json:generation.diagnostics",
+                         "privacy_warning": PRIVACY_WARNING}, workspace_id=snapshot.workspace_id,
+            scenario_revision=snapshot.scenario_revision, error=artifact.blocked,
+            diagnostics=artifact.diagnostics, diagnostics_section="generation-diagnostics",
+        )
+        if len(artifact.diagnostics) > 10:
+            data = cast(dict[str, JSONValue], result["data"])
+            continuation = cast(dict[str, JSONValue], data["diagnostics_continuation"])
+            continuation["pointer"] = "/" + targets[0] if len(targets) == 1 else ""
+        return result
+
+    def _generation_artifact(
+        self, workspace: Path, snapshot: WorkspaceSnapshot, capture: Capture, grouping: Grouping,
+        targets: tuple[str, ...],
+    ) -> GenerationArtifact:
+        baseline = (self._load(workspace, snapshot.scenario_revision - 1)[0]
+                    if snapshot.scenario_revision > 1 else None)
+        return GenerationBuilder().build(
+            snapshot, capture, grouping,
+            self._report_artifact(snapshot, capture, grouping, baseline), targets,
         )
 
 

@@ -32,13 +32,16 @@ application does not contain an LLM client or contact captured endpoints.
   uses, recorded checks, candidate evidence, revision diffs and ungenerated source maps.
 - Opaque Groovy/C code-block and helper declarations, scalar `agent_code` outputs,
   dependency/order contracts, source digests and per-target missing-implementation checks.
+- First static/literal generation profile: selected request materialization, structural
+  JMX and intermediate LoadRunner C source, per-target capability errors and digest-linked reports.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
-both generators and their runtime code/helper wrappers, runnable bundle export/handoff/redaction,
+runtime variable/extractor/code/helper generation, complete verified VuGen projects,
+runnable bundle export/handoff/redaction,
 author/critic skills, native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.5.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.6.0a1` writes workspace schema `2.0` with scenario
 schema `1.3`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -46,6 +49,7 @@ rejected; no workspace is silently migrated.
 Existing `0.3.0a1`/`0.4.0a1` scenarios 1.2 remain readable/editable with their previous
 operations. Target extensions and `agent_code` require an explicit `upgrade_extensions`
 change to scenario 1.3. Reads never perform this upgrade.
+Existing `0.5.0a1` workspaces are readable/editable without another schema upgrade.
 
 ## Install
 
@@ -235,6 +239,131 @@ Rules and limits:
   available through bounded `inspect --section history`. They are private data.
 - Group membership/order, source IDs, timing settings and execution/target states
   remain fixed in this slice. Arbitrary JSON patches or code execution are not accepted.
+
+## First generation profile: static requests and literal bindings
+
+```sh
+har2load generate --workspace workspaces/demo --check
+har2load generate --workspace workspaces/demo --target jmeter --check
+har2load inspect --workspace workspaces/demo --section materialized-requests
+har2load generate --workspace workspaces/demo --output workspaces/generated-r3 --revision 3
+har2load inspect --workspace workspaces/demo --section generation-diagnostics
+```
+
+`generate` requires either `--check` (render and check in memory, no writes) or
+`--output NEW_DIRECTORY`. `--target` is `both` by default, or `jmeter`/`loadrunner`.
+Both modes are offline and **never execute, compile or natively load artifacts**.
+The profile is `static_literals_v1`, not the complete product support matrix.
+
+Supported inputs are HTTP/HTTPS GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, ASCII URLs,
+ASCII headers, and bounded UTF-8 JSON/text/URL-encoded request bodies. Selected
+URL/queryString, text/params and Content-Type/mimeType representations are respected;
+unresolved request conflicts block generation. Response-only conflicts remain in
+the evidence report but do not block this request-only profile.
+
+Literal variables may be bound to exact request locations. JSON bindings retain
+scalar types and decimal precision; only JSON bodies with a binding are structurally
+reserialized. Unbound body bytes and unaffected query/form occurrences retain their
+recorded spelling. A path replacement is encoded as one segment. Selected HAR query
+and form arrays preserve order, duplicate names and empty values. Text replacements
+use the recorded character spans. Raw HAR bytes and scenario revisions never change.
+
+These immutable constants are **folded at preparation time**, not emitted as runtime
+variables/lifecycle processors. Reports explicitly mark folded variables/lifecycle
+actions and map each binding to the generated request component. Literal values are
+therefore not populated as named runtime variables in Debug Sampler. Any external,
+generated, extracted or agent-code variable, and even an unreferenced extractor,
+blocks this static profile rather than silently dropping its contract. Target-local
+code/helper declarations block that target until runtime wrappers are implemented.
+
+Managed-header policy `managed_headers_v1` omits Host, Content-Length, Connection,
+Keep-Alive, Transfer-Encoding, TE, Trailer, Upgrade, Proxy-Connection and fields named
+by Connection. Every omission is listed in materialization decisions; binding to
+an omitted field is rejected. Native clients manage transport framing. Selected
+Content-Type is retained or supplied from the chosen body metadata; no response
+Content-Type is substituted for it. URL fragments are explicitly omitted as
+non-HTTP data. Captured authentication headers or nonempty Cookie/cookies state
+are rejected: this profile cannot establish initial session prerequisites.
+
+Missing bodies are not invented. POST/PUT/PATCH without postData need explicit
+`bodySize: 0`; a positive known body size without data is blocked. Multipart/file
+uploads, compressed request bodies, non-UTF-8 body encodings, invalid header data,
+and unknown methods are unsupported. This deliberately conservative alpha may
+reject real captures that later profiles will support.
+
+### JMeter artifact
+
+`jmeter/scenario.jmx` is serialized structurally with an intended **JMeter 5.5 /
+Java 8** baseline, checked against pinned `rel/v5.5` source contracts. Native loading
+has **not** been verified. It contains DebugTG (one thread/iteration, continue on
+error), Module Controllers referencing final root Test Fragment names, Transaction
+Controllers, HTTP samplers, a native Cookie Manager, Debug Sampler and View Results
+Tree. There are no Backend Listeners, Cache Manager, timers, disabled samplers,
+automatic redirects or embedded-resource downloads. Debug output can expose secrets.
+
+Raw bodies are supported for POST/PUT/PATCH/DELETE. GET/HEAD/OPTIONS bodies are
+rejected rather than moved into query parameters. Ordered duplicate headers are
+retained. XML-invalid text and any literal `${` in native properties/display labels
+are rejected to prevent recorded data becoming JMeter functions. CR/LF text is
+preserved using XML character references. XML parsing alone is not native or wire
+validation; `native_validation: not_run`, `compatibility: unverified` remain explicit.
+POST/PUT/PATCH/DELETE also require an explicit materialized Content-Type, even for
+absent or empty bodies: JMeter 5.5 would otherwise introduce a form Content-Type.
+Rather than silently accept that known transformation, this target is blocked with
+`JMETER_CONTENT_TYPE_REQUIRED`; LoadRunner may still produce its scaffold.
+
+### LoadRunner intermediate source
+
+`loadrunner/Action.c`, `vuser_init.c`, `vuser_end.c`, `globals.h` and `README.txt`
+form a **C source scaffold, not a complete VuGen project**. No fabricated `.usr`,
+run-logic or `default.cfg` is supplied. `project_status: incomplete` and
+`template_status: pending` remain even when these files are successfully generated.
+Public API documentation 25.1–25.3 supplies construction facts only; it is not an
+agreed target version. A real Web HTTP/HTML template and native environment are
+still required. Do not start load or claim compilation from this scaffold.
+
+Requests use `web_custom_request`. Body bytes use `RAW_BODY_START` byte buffers,
+which the documented API does not parameterize; braces, backslashes and UTF-8 data
+remain body data. EncType reflects request Content-Type and does not encode bytes.
+Other parameterizable URL/header attributes containing braces are blocked, as are
+duplicate header names whose native behavior cannot be preserved by this profile.
+Transaction/request names are generated safe IDs; original labels remain in the
+model/report rather than becoming C source. Runtime cookie/cache cleanup and
+continue-on-error are requested. Redirect/resource options are emitted, but native
+acceptance and their actual effects are unverified; service return values are
+currently unchecked. System C compilation is not a native VuGen compatibility test.
+
+### Publication, partial results and provenance
+
+A blocked target produces no partial native files. Another supported target can
+still be generated; the command returns exit 3 if any requested target is blocked.
+With `--output`, JSON/Markdown reports and a manifest are published even if all
+targets are blocked. **A nonzero result may therefore leave useful partial output.**
+`generated` means artifacts were rendered, not native-ready or replay-tested. For
+LoadRunner it means intermediate C source only. An explicitly requested target
+never disappears from the result.
+
+Output publication reserves a new private directory and writes `manifest.json`
+last, with hashes of all native/report files. It never overwrites manual outputs.
+Failure may leave incomplete output: preserve it, verify any manifest and digests,
+and choose a new destination. It is not a hostile-filesystem or universal power-loss
+guarantee. Default stdout is value-free metadata; explicit materialization inspection,
+native files and reports are **private/unredacted**.
+
+The generated report (schema 1.2) links the pinned model revision and capture hash
+to actual file digests and stable JMX component paths/C markers. It records constant
+folding, header policy, per-target limitations and generation diagnostics. No source
+map claims a runtime variable that was optimized away. Ordinary `report` remains
+model-only and does not discover external output directories automatically; use
+the report accompanying the generated artifact set to review that set.
+
+Budgets: 1–1000 requests, 1000 headers/request and 10,000 total headers, 10,000
+structured fields per selected query/form view, 20,000 materialization decisions,
+1 MiB per textual/header view/body, 4 MiB
+total body bytes and 8 MiB accumulated materialized request data. Each target has
+a 32 MiB output budget (combined C files for LoadRunner); report format budgets
+still apply. Limits produce explicit blocked/limit diagnostics, not hidden truncation.
+For long diagnostic lists follow revision-pinned `diagnostics_continuation`.
 
 ## Candidates and evidence reports
 
@@ -750,7 +879,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.5.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.6.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .
