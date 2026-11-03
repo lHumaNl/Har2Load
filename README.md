@@ -42,7 +42,7 @@ collection variables, regex/native selectors, native component properties/allowl
 external/generated source execution, code/helper runtime wrappers, response-header/cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
-author/critic skills, native validation, and replay. Both JMeter and LoadRunner
+author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
 interchange format. Version `0.7.0a1` writes workspace schema `2.0` with scenario
 schema `1.3`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
@@ -299,8 +299,9 @@ reject real captures that later profiles will support.
 ### JMeter artifact
 
 `jmeter/scenario.jmx` is serialized structurally with an intended **JMeter 5.5 /
-Java 8** baseline, checked against pinned `rel/v5.5` source contracts. Native loading
-has **not** been verified. It contains DebugTG (one thread/iteration, continue on
+Java 8** baseline, checked against pinned `rel/v5.5` source contracts. Generation
+does not perform native loading; separate synthetic-fixture evidence is described
+below. It contains DebugTG (one thread/iteration, continue on
 error), Module Controllers referencing final root Test Fragment names, Transaction
 Controllers, HTTP samplers, a native Cookie Manager, Debug Sampler and View Results
 Tree. There are no Backend Listeners, Cache Manager, timers, disabled samplers,
@@ -487,10 +488,31 @@ revision history. Reports disclose failure-wire policy and per-target implementa
 status separately from captured extraction checks.
 
 **Runtime correctness/native compatibility is not certified by these artifacts.**
-Python tests inspect generated structure, data, ordering and contracts; they do not
-execute Groovy/C, load JMeter, invoke VuGen or replay HTTP. `native_validation`,
+The default Python `tests/` suite inspects structure, data, ordering and contracts;
+it does not execute Groovy/C, load JMeter, invoke VuGen or replay HTTP. `native_validation`,
 `runtime_validation` and execution remain `not_run`. Live debug output may contain
 secrets; redaction is still off. Native acceptance remains a separate explicit step.
+
+### Separate synthetic execution harness
+
+The opt-in developer suite in [`validation/`](validation/README.md) runs outside
+ordinary preparation. It has exercised generated JMX loading/module resolution and
+fixed JSR223 processors on **JMeter 5.5 / Azul Zulu Java 8u512**, macOS ARM64, with
+synthetic response objects and an OS-enforced network prohibition. It does not
+start a JMeter engine or sample HTTP requests. Successful fixtures do not certify
+all scenarios, full thread-engine behavior, GUI operation or wire parity.
+
+The same suite compiles and executes emitted C helpers/parser and lifecycle code
+using **Apple Clang 21, ASan/UBSan and deliberate synthetic SDK stubs**. This is not
+VuGen compilation, SDK ABI, concurrent-Vuser isolation or native transport evidence.
+Sanitizer and processor-error negative controls check the test oracles themselves.
+
+These tests require explicit `HAR2LOAD_NATIVE_VALIDATION=1` and a supported
+network-denying sandbox; they skip without opt-in and refuse unsandboxed fallback.
+Tool acquisition is separate, verified setup—not an implicit download in tests or
+the CLI. No real HAR, captured endpoint, authored block or declared dependency is
+used. Developer-fixture results do not update a workspace or turn its generated
+artifact manifest's `not_run` statuses into a native acceptance claim.
 
 ## Candidates and evidence reports
 
