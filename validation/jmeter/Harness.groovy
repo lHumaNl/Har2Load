@@ -22,10 +22,14 @@ import org.apache.logging.log4j.core.LogEvent
 
 class ProcessorErrors extends AbstractAppender {
     final List<String> errors = Collections.synchronizedList(new ArrayList<String>())
+    final List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
     ProcessorErrors() { super('Har2LoadHarnessErrors', null, null, true) }
     @Override void append(LogEvent event) {
         if (event.level.isMoreSpecificThan(Level.ERROR) && event.loggerName.contains('JSR223')) {
             errors.add(event.message.formattedMessage)
+        }
+        if (event.level == Level.WARN && event.loggerName.contains('JSR223')) {
+            warnings.add(event.message.formattedMessage)
         }
     }
 }
@@ -39,7 +43,8 @@ SaveService.loadProperties()
 def collector = new ProcessorErrors()
 collector.start()
 def logging = LogManager.getContext(false)
-logging.configuration.rootLogger.addAppender(collector, Level.ERROR, null)
+logging.configuration.rootLogger.setLevel(Level.WARN)
+logging.configuration.rootLogger.addAppender(collector, Level.WARN, null)
 logging.updateLoggers()
 // Prove that swallowed processor ScriptExceptions cannot produce a false PASS.
 def negative = new JSR223PreProcessor()
@@ -109,6 +114,9 @@ manifest.each { testcase ->
             ctx.setVariables(variables)
             ctx.setPreviousResult(null)
             testcase.steps.eachWithIndex { step, index ->
+                collector.warnings.clear()
+                def previous = ctx.getPreviousResult()
+                def previousSuccess = previous?.isSuccessful()
                 if (step.event == 'iteration') {
                     def result = init.sample(null) // Only the generated fixed initializer, never HTTP.
                     assert result.isSuccessful() == (step.success != false): "initializer ${index}"
@@ -160,14 +168,22 @@ manifest.each { testcase ->
                         response.setDataEncoding(step.charset ?: 'UTF-8')
                         response.setResponseData(step.response_b64 ?
                             Base64.decoder.decode(step.response_b64) : step.response.getBytes('UTF-8'))
-                        ctx.setPreviousResult(response)
+                        ctx.setPreviousResult(step.missing_result ? null : response)
                         children.find { it instanceof JSR223PostProcessor }.process()
-                        assert response.isSuccessful() == (step.success != false):
+                        assert response.isSuccessful() == (step.transport_success != false):
                             "response status case=${testcase.name} step=${index}"
-                        if (step.assertions) assert response.getAssertionResults().length > 0
+                        assert response.getAssertionResults().length == 0:
+                            "unexpected correlation assertion case=${testcase.name} step=${index}"
+                        assert response.getResponseCode() ==
+                            (step.transport_success == false ? '500' : '200')
                         if (testcase.running_version) sampler.recoverRunningVersion()
                     }
                 }
+                if (step.event != 'post' && previous != null) {
+                    assert previous.isSuccessful() == previousSuccess: 'previous status changed'
+                }
+                if (step.warning) assert !collector.warnings.empty:
+                    "missing error marker log case=${testcase.name} step=${index}"
                 assert collector.errors.empty: "Processor execution ERROR: ${collector.errors}"
                 if (step.values) step.values.each { name, expected ->
                     assert variables.get(name) == expected: "variable ${name} case=${testcase.name}"

@@ -12,6 +12,7 @@ from typing import cast
 
 from har2load import __version__
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
+from har2load.extension_runtime import capability_diagnostics
 from har2load.extensions import TargetExtensions
 from har2load.generation_types import GENERATION_PROFILE, RequestPlan, TargetBuild
 from har2load.jmeter import JMeterGenerator
@@ -19,7 +20,11 @@ from har2load.loadrunner import LoadRunnerGenerator
 from har2load.presentation import record
 from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
 from har2load.runtime_planning import GenerationPlanner
-from har2load.runtime_types import RUNTIME_PROFILE
+from har2load.runtime_types import (
+    EXTENSION_RUNTIME_PROFILE,
+    RUNTIME_PROFILE,
+    RUNTIME_STATUS_POLICY,
+)
 from har2load.serialization import canonical_bytes
 from har2load.workspace import WorkspaceSnapshot
 
@@ -27,6 +32,14 @@ TARGETS = ("jmeter", "loadrunner")
 _FILES = {"jmeter/scenario.jmx", "loadrunner/Action.c", "loadrunner/globals.h",
           "loadrunner/vuser_init.c", "loadrunner/vuser_end.c", "loadrunner/README.txt"}
 _PARAMETER_KINDS = {"variable", "initialize", "reset", "extractor", "binding"}
+_RUNTIME_KINDS = _PARAMETER_KINDS | {
+    "code_block", "reset_outputs", "helper_definition", "helper_call",
+}
+
+
+def _map_key(row: dict[str, JSONValue]) -> tuple[str, str, str, str]:
+    return (cast(str, row["target"]), cast(str, row["kind"]), cast(str, row["entity_id"]),
+            cast(str, row.get("helper_id", "")) if row["kind"] == "helper_call" else "")
 
 
 def _hash(data: bytes) -> str:
@@ -59,14 +72,14 @@ def _valid_locator(row: dict[str, JSONValue]) -> bool:
 def _validate_runtime_maps(
     baseline: list[dict[str, JSONValue]], mappings: list[JSONValue], statuses: dict[str, JSONValue],
 ) -> None:
-    expected = {(r["target"], r["kind"], r["entity_id"]) for r in baseline
-                if r["kind"] in _PARAMETER_KINDS and r["disposition"] != "removed"
+    expected = {_map_key(r) for r in baseline
+                if r["kind"] in _RUNTIME_KINDS and r["disposition"] != "removed"
                 and statuses.get(cast(str, r["target"])) == "generated"}
-    seen: set[tuple[JSONValue, JSONValue, JSONValue]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for row in _objects(mappings):
-        if row["kind"] not in _PARAMETER_KINDS:
+        if row["kind"] not in _RUNTIME_KINDS:
             continue
-        key = row["target"], row["kind"], row["entity_id"]
+        key = _map_key(row)
         if key not in expected or key in seen or not _valid_locator(row):
             raise _map_error()
         seen.add(key)
@@ -86,10 +99,8 @@ def _target(
     diagnostics = [replace(d, target=name) for d in plan.diagnostics]
     diagnostics.extend(d for d in TargetExtensions.diagnostics(extensions, parameters)
                        if d.target == name and d.severity == "error")
-    if any(item["target"] == name for kind in ("blocks", "helpers")
-           for item in _objects(extensions[kind])):
-        diagnostics.append(Diagnostic("GENERATION_EXTENSION_UNSUPPORTED", "error",
-            "Code/helper runtime wrappers are outside this generation profile.", target=name))
+    if plan.runtime is not None:
+        diagnostics.extend(capability_diagnostics(plan.runtime, name))
     generator = JMeterGenerator() if name == "jmeter" else LoadRunnerGenerator()
     return generator.generate(replace(plan, diagnostics=tuple(diagnostics)))
 
@@ -117,7 +128,7 @@ def _parameter_map(
         _validate_runtime_maps(baseline, mappings, statuses)
     requests = {(item["target"], item["entity_id"]): item for item in _objects(mappings)
                 if item["kind"] == "request"}
-    implementations = {(item["target"], item["kind"], item["entity_id"]): item
+    implementations = {_map_key(item): item
                        for item in _objects(mappings)}
     for row in baseline:
         target = cast(str, row["target"])
@@ -128,12 +139,15 @@ def _parameter_map(
             })
             continue
         if runtime:
-            implementation = implementations.get((target, row["kind"], row["entity_id"]))
+            implementation = implementations.get(_map_key(row))
             if implementation is None:
                 raise Har2LoadError("GENERATION_MAP_INVALID",
                                    "Runtime declaration has no artifact mapping.", 3)
             result.append({**row, **implementation, "disposition": "runtime_emitted",
-                           "reason": "Declared runtime action emitted; native behavior unverified"})
+                           "declaration_disposition": row["disposition"],
+                           "reason": ("Declared helper access emitted; source calls unverified"
+                                      if row["kind"] == "helper_call" else
+                                      "Runtime action emitted; native behavior unverified")})
             continue
         if row["kind"] == "binding":
             binding = bindings[row["entity_id"]]
@@ -160,7 +174,22 @@ def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValu
         failure.update({"failure_wire_policy": "error_marker_json_string_v1",
                         "marker": "ERROR_" + cast(str, cast(dict[str, JSONValue],
                                                            variable["declaration"])["name"]),
-                        "marker_is_typed_success": False, "stale_value_reuse": "forbidden"})
+                         "marker_is_typed_success": False, "stale_value_reuse": "forbidden",
+                         "native_status_policy": RUNTIME_STATUS_POLICY})
+    extensions = cast(dict[str, JSONValue], document["target_extensions"])
+    extensions.update({"runtime_implementation": "target_specific",
+                       "target_implementations": target_statuses.copy(),
+                       "output_commit_policy": "per_output_validated_v1",
+                       "native_status_policy": RUNTIME_STATUS_POLICY,
+                       "wrapper_failure_handling": "reported_errors_only_not_fault_containment",
+                       "helper_calls": "author_declared_not_observed"})
+    document["limitations"] = [
+        "Emitted wrappers do not prove authored code semantics, safety or target parity.",
+        "Successful validated outputs survive later failures; other outputs remain markers.",
+        "Correlation errors never override native sample/transaction status.",
+        "Ordinary preparation never executes source or resolves runtime dependencies.",
+        "Native crashes, undefined behavior, infinite loops and side effects are not contained.",
+    ]
 
 
 @dataclass(frozen=True)
@@ -183,7 +212,9 @@ class GenerationBuilder:
         selected = tuple(target for target in TARGETS if target in targets)
         plan = GenerationPlanner().build(capture, grouping, snapshot.scenario)
         runtime = plan.runtime is not None
-        profile = RUNTIME_PROFILE if runtime else GENERATION_PROFILE
+        authored = bool(plan.runtime and (plan.runtime.blocks or plan.runtime.helpers))
+        profile = (EXTENSION_RUNTIME_PROFILE if authored else RUNTIME_PROFILE if runtime
+                   else GENERATION_PROFILE)
         builds = tuple(_target(target, plan, snapshot.scenario) for target in selected)
         files = {path: data for build in builds for path, data in build.files.items()}
         if any(path not in _FILES for path in files):
@@ -195,7 +226,7 @@ class GenerationBuilder:
         }
         diagnostics = tuple(d for build in builds for d in build.diagnostics)
         document = deepcopy(base_report.document)
-        document["report_schema_version"] = "1.3" if runtime else "1.2"
+        document["report_schema_version"] = "1.4" if runtime else "1.2"
         document["targets"] = {target: target_metadata.get(target, {"status": "not_requested"})
                                for target in TARGETS}
         jmeter_generated = statuses.get("jmeter") == "generated"
@@ -221,11 +252,12 @@ class GenerationBuilder:
         document["source_map"] = _parameter_map(
             _objects(document["source_map"]), maps, snapshot.scenario, statuses, runtime
         ) + [row for row in maps if not runtime or cast(dict[str, JSONValue], row)["kind"]
-             not in _PARAMETER_KINDS]
+              not in _RUNTIME_KINDS]
         if runtime:
             _runtime_report(document, statuses)
         document["generation"] = {
-            "profile": profile, "profile_version": "1", "producer_version": __version__,
+            "profile": profile, "profile_version": "1" if authored or not runtime else "2",
+            "producer_version": __version__,
             "requested_targets": list(selected), "decisions": list(plan.decisions),
             "diagnostics": [record(d) for d in diagnostics],
             "native_artifact_digests": {path: _hash(data) for path, data in sorted(files.items())},
@@ -242,6 +274,8 @@ class GenerationBuilder:
         if runtime:
             generation = cast(dict[str, JSONValue], document["generation"])
             generation.update({"failure_wire_policy": "error_marker_json_string_v1",
+                                "native_status_policy": RUNTIME_STATUS_POLICY,
+                                "output_commit_policy": "per_output_validated_v1",
                                "runtime_validation": "not_run",
                                "failure_changes_json_type": True,
                                "success_preserves_declared_type": True})

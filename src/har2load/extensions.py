@@ -4,6 +4,8 @@ Operations permit temporary dangling references; validate the complete batch. Pl
 describes declared scheduling only, and never inspects source semantics or resources.
 ParameterModel owns scalar types, initialization shapes and scope/reset validation;
 callers must validate parameters before checking these extension cross-references.
+Only explicit scalar_body_v1 opts into a wrapper contract; absent ABI stays opaque.
+Neither form establishes source validity, native readiness or permission to execute.
 """
 
 import re
@@ -23,6 +25,7 @@ MAX_PATH_LENGTH, MAX_PURPOSE_LENGTH = 256, 1024
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _CHANGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _TARGETS = {"jmeter": "groovy", "loadrunner": "c"}
+_RUNTIME_ABI = "scalar_body_v1"
 _EFFECTS = ("network", "filesystem", "process", "environment", "shared_state", "unknown")
 _COMMON = {"id", "target", "language", "source", "depends_on", "dependencies",
            "side_effects", "purpose"}
@@ -132,8 +135,16 @@ def _helper(record: Record) -> None:
     _require("shared_state" not in cast(list[str], record["side_effects"]))
 
 
+def _record_shape(kind: str, value: JSONValue, stored: bool) -> Record:
+    record = _object(value)
+    optional = {"runtime_abi"} if "runtime_abi" in record else set()
+    _require(not optional or record["runtime_abi"] == _RUNTIME_ABI)
+    return _shape(record, _FIELDS[kind] | optional
+                  | ({"source_digest", "change_id"} if stored else set()))
+
+
 def _record(kind: str, value: JSONValue, *, stored: bool = False) -> Record:
-    record = _shape(value, _FIELDS[kind] | ({"source_digest", "change_id"} if stored else set()))
+    record = _record_shape(kind, value, stored)
     _identifier(record["id"])
     _require(isinstance(record["target"], str) and record["target"] in _TARGETS)
     _require(record["language"] == _TARGETS[cast(str, record["target"])])
@@ -322,14 +333,15 @@ def _missing(blocks: list[Record]) -> list[Diagnostic]:
 
 
 def _helper_plan(helper: Record) -> Record:
-    return {key: deepcopy(helper[key]) for key in ("id", "namespace", "symbol", "depends_on")}
+    return {key: deepcopy(helper[key])
+            for key in ("id", "namespace", "symbol", "depends_on", "runtime_abi") if key in helper}
 
 
 def _block_plan(block: Record, grouping: Grouping) -> Record:
     result = {key: deepcopy(block[key]) for key in (
         "id", "behavior_id", "placement", "order", "depends_on", "inputs", "outputs",
-        "helper_calls",
-    )}
+        "helper_calls", "runtime_abi",
+    ) if key in block}
     exchange = _object(block["placement"])["exchange_id"]
     result["group_id"] = next((group.id for group in grouping.groups
                                if exchange in group.exchange_ids), None)
@@ -370,9 +382,16 @@ class TargetExtensions:
         return True
 
     @staticmethod
-    def apply_operation(extensions: Record, op: Record, change_id: str) -> bool:
+    def apply_operation(extensions: Record, op: Record, change_id: str, *,
+                        allow_runtime_abi: bool = False) -> bool:
         if not TargetExtensions.validate_operation(op):
             return False
+        if not allow_runtime_abi and any(
+            isinstance(op.get(kind), dict) and "runtime_abi" in _object(op[kind])
+            for kind in _FIELDS
+        ):
+            raise Har2LoadError("SCENARIO_UPGRADE_REQUIRED",
+                                "Explicit upgrade_extension_runtime operation required.", 3)
         _identifier(change_id, provenance=True)
         _shape(extensions, set(_LIMITS))
         _apply(extensions, op, change_id)
@@ -380,9 +399,10 @@ class TargetExtensions:
 
     @staticmethod
     def validate(extensions: JSONValue, parameters: Record, capture: Capture,
-                 grouping: Grouping) -> None:
+                 grouping: Grouping, *, allow_runtime_abi: bool = False) -> None:
         container = _shape(extensions, set(_LIMITS))
         blocks, helpers = (_records(container, key) for key in _LIMITS)
+        _require(allow_runtime_abi or all("runtime_abi" not in item for item in blocks + helpers))
         order = {identifier: index
                  for index, identifier in enumerate(grouping.ordered_exchange_ids)}
         _require(set(order) == {exchange.id for exchange in capture.exchanges}

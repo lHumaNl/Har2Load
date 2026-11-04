@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Iterator
 from hashlib import sha256
 
+from har2load import loadrunner_extensions as extensions
 from har2load import loadrunner_runtime as runtime
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
@@ -14,7 +15,9 @@ from har2load.generation_types import (
     TargetBuild,
 )
 from har2load.runtime_types import (
+    EXTENSION_RUNTIME_PROFILE,
     RUNTIME_PROFILE,
+    RUNTIME_STATUS_POLICY,
     RuntimePlan,
     RuntimeRequest,
     RuntimeTemplate,
@@ -109,15 +112,20 @@ def _metadata(plan: RequestPlan | None = None) -> dict[str, JSONValue]:
     result: dict[str, JSONValue] = {
         "artifact_kind": "c_source_scaffold", "project_status": "incomplete",
         "compatibility": "unverified", "native_validation": "not_run",
-        "execution": "not_run", "profile": GENERATION_PROFILE,
+        "execution": "not_run", "profile": GENERATION_PROFILE, "profile_version": "1",
         "template_status": "pending", "target_version": None,
         "sources": [_DOC_ROOT + path for path in _DOC_PATHS],
     }
     if plan is not None and plan.runtime is not None:
-        result.update(profile=RUNTIME_PROFILE, limitations=list(runtime.LIMITATIONS),
+        result.update(profile=RUNTIME_PROFILE, profile_version="2",
+                      limitations=list(runtime.LIMITATIONS),
                       sources=[_DOC_ROOT + path for path in (*_DOC_PATHS, *runtime.DOC_PATHS)],
                       json_failure_wire_policy="quoted_error_marker",
                       runtime_state_isolation="per_vuser_native_verification_pending")
+        result["native_status_policy"] = RUNTIME_STATUS_POLICY
+        if extensions.enabled(plan.runtime):
+            result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="1",
+                          output_commit_policy="per_output_validated_v1")
     return result
 
 
@@ -208,7 +216,8 @@ def _source_map(plan: RequestPlan) -> tuple[dict[str, JSONValue], ...]:
         entry.update(exchange_id=request.id, group_id=request.group_id)
     for entry, group in zip(groups, plan.groups, strict=True):
         entry["group_id"] = group.id
-    return tuple(groups + requests) + (tuple(runtime.source_map(plan.runtime))
+    return tuple(groups + requests) + (tuple(runtime.source_map(plan.runtime)) +
+                                      tuple(extensions.source_map(plan.runtime))
                                       if plan.runtime is not None else ())
 
 
@@ -317,11 +326,13 @@ def _runtime_request(request: RuntimeRequest, native: NativeRequest,
     yield from _runtime_buffers(request, model)
     yield from runtime.reset_lines(model, ("request",))
     yield from runtime.event_lines(model, "before_request", request.id)
+    yield from extensions.event_lines(model, "before_request", request.id)
     yield from runtime.registration(model, request.id)
     yield from _runtime_materialize(request)
     yield from _runtime_http(request, native, index)
     yield from runtime.extraction_lines(model, request.id)
     yield from runtime.event_lines(model, "after_response", request.id)
+    yield from extensions.event_lines(model, "after_response", request.id)
     yield from runtime.reset_lines(model, ("request",))
     for name, _, _ in _runtime_fields(request):
         yield f"    free(buffer_{name}.data);"
@@ -337,8 +348,7 @@ def _runtime_groups(plan: RequestPlan, model: RuntimePlan) -> Iterator[str]:
         for entity in group.exchange_ids:
             number, native, live = requests[entity]
             yield from _runtime_request(live, native, number, model)
-        yield (f'    lr_end_transaction("TC_{index:04d}", '
-               'h2l_transaction_failed ? LR_FAIL : LR_AUTO);')
+        yield f'    lr_end_transaction("TC_{index:04d}", LR_AUTO);'
         yield '    h2l_transaction_failed = 0;'
 
 
@@ -346,6 +356,7 @@ def _runtime_action(plan: RequestPlan, model: RuntimePlan) -> Iterator[str]:
     yield '#include "globals.h"'
     yield from runtime.helpers()
     yield from runtime.declarations(model)
+    yield from extensions.definitions(model)
     yield from runtime.session_lines(model)
     yield "int Action(void) {"
     yield "    lr_continue_on_error(LR_ON_ERROR_CONTINUE);"
@@ -368,7 +379,7 @@ class _Output:
     def add(self, path: str, lines: Iterable[str]) -> None:
         data = bytearray()
         for line in lines:
-            encoded = (line + "\n").encode("ascii")
+            encoded = (line + "\n").encode("utf-8")
             if self.used + len(encoded) > MAX_GENERATED_BYTES:
                 raise _OutputLimit
             self.used += len(encoded)
@@ -393,6 +404,8 @@ def _files(plan: RequestPlan) -> dict[str, bytes]:
         raise _OutputLimit
     output = _Output()
     globals_text, init, end, readme = _scaffold_text(plan.runtime is not None)
+    if plan.runtime is not None and extensions.enabled(plan.runtime):
+        readme = readme.replace(RUNTIME_PROFILE, EXTENSION_RUNTIME_PROFILE)
     output.add("loadrunner/globals.h", globals_text.splitlines())
     output.add("loadrunner/vuser_init.c", init.splitlines())
     output.add("loadrunner/vuser_end.c", end.splitlines())

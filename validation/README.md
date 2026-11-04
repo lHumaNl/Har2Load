@@ -72,7 +72,7 @@ validate a user's separately generated artifact set or mutate its report.
   Verified SHA-256 before extraction/execution:
   `f26e2a91062542cf22ef2171b2556e1c3f42cf87cf174258b3df7840365892aa`.
 
-## JMeter verification — 2026-11-04
+## Historical JMeter verification — 2026-11-04, 0.7.0a1
 
 Against unchanged production source from `b4e5010775d2fa32e60bf3f05d3a6dfdb3f61ef8`,
 the lead executed 45 cases on JMeter 5.5 / Azul Java `1.8.0_512-b08`, ARM64:
@@ -87,7 +87,7 @@ correspondence, independent failures/scope resets, and native sampler-state chec
 This is fixture-level execution evidence only, subject to the limits above; it is
 not approval of the C harness or native wire/engine compatibility.
 
-## Integrated verification — 2026-11-04
+## Historical integrated verification — 2026-11-04, 0.7.0a1
 
 After separate independent **APPROVE / PASS** reviews for both harnesses, the final
 evidence is **50 passing pytest tests** in the lead's fresh `integrated-run-2`
@@ -107,3 +107,44 @@ Evidence is retained in a private temporary directory named
 runs remain separate. Tests and documentation are uncommitted at this checkpoint.
 None of these results changes per-workspace `not_run` statuses or the outstanding
 VuGen/full-engine/wire-compatibility limits.
+
+## Current policy under test
+
+Version 0.8 adopts the owner's revised `markers_only_native_status_v1`: generated
+correlation logic must neither fail successful native results nor turn failed native
+results green. JMeter checks preserve success, response codes and assertions;
+LoadRunner checks require `LR_AUTO` and `lr_output_message`, not the potentially
+status-changing `lr_error_message`. Mutation controls deliberately introduce both
+directions of JMeter status override and C transaction/error-logging regressions.
+Historical passes above do not certify changed source; each new run needs fresh
+evidence and a new private basetemp.
+
+## Authored-wrapper verification — 2026-11-04, 0.8.0a1
+
+The lead's final fresh `wrappers-integrated-final` run passed **105 pytest tests**
+in 187.43s: **103 C tests** plus two JMeter batches (**55 authored cases**, each
+with two independent workers, and **53 baseline/status-control cases**).
+All 108 JMX fixture digests were independently rechecked against the saved reports.
+The runtime versions were JMeter 5.5 / Azul Java `1.8.0_512-b08`; C used the existing
+Apple Clang 21 ASan/UBSan harness. Compiler/processor/reset/status negative controls
+remain part of the evidence. A focused allocator failure confirms that output A
+survives while output B becomes its marker, without changing native status.
+
+Common/schema and JMeter reviews approved their scopes; C review passed with notes
+about caller-owned C memory and the synthetic-only boundary. C argument-array extent
+requirements are documented, and the suggested partial-output OOM check was added.
+Default suite: **1176 passed** with both pytest entry points; native disabled:
+**105 skipped**. Ruff and strict mypy (33 package modules) passed.
+
+Installed-wheel smoke used a real 0.7-created workspace, verified read-only access,
+explicit 1.4 upgrade/ABI changes, identical retry, historical revision preservation,
+both target outputs and manifest digests. It reproduced and fixed a producer-version
+allowlist regression. All 33 installed wheel modules matched the final source bytes.
+Final wheel SHA-256:
+`3b983ac6b75419863f0d0a65563897b36d68471fab469da81f6b09025e0fa026`.
+
+The private execution record is `wrappers-integrated-final/lead-verification.json`
+under the investigation root, with source/evidence digests. Package installation
+evidence is in the separate private `har2load-wrappers-install-vap_4wje` directory.
+No captured HTTP, engine execution, actual VuGen/SDK verification or arbitrary
+customer-code execution was performed. Per-workspace readiness remains `not_run`.

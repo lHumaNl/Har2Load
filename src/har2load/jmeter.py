@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import cast
 from urllib.parse import urlsplit
 
+from har2load import jmeter_extensions as extensions
 from har2load import jmeter_runtime as runtime
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
@@ -22,7 +23,12 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
-from har2load.runtime_types import RUNTIME_PROFILE, RuntimePlan
+from har2load.runtime_types import (
+    EXTENSION_RUNTIME_PROFILE,
+    RUNTIME_PROFILE,
+    RUNTIME_STATUS_POLICY,
+    RuntimePlan,
+)
 
 ARTIFACT = "jmeter/scenario.jmx"
 TARGET = "jmeter"
@@ -76,9 +82,13 @@ class JMeterGenerator:
 
 
 def _metadata(runtime_plan: RuntimePlan | None = None) -> dict[str, JSONValue]:
+    authored = bool(runtime_plan and extensions.enabled(runtime_plan))
     return {
-        "profile": RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE,
-        "profile_version": "1", "artifact_kind": "jmx",
+        "profile": (EXTENSION_RUNTIME_PROFILE if authored
+                    else RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE),
+        "profile_version": "2" if runtime_plan and not authored else "1", "artifact_kind": "jmx",
+        **({"output_commit_policy": "per_output_validated_v1"} if authored else {}),
+        "native_status_policy": RUNTIME_STATUS_POLICY,
         "compatibility": "unverified", "native_validation": "not_run", "execution": "not_run",
         "intended_baseline": {"jmeter": "5.5", "java": "8"},
         "sources": cast(list[JSONValue], [SOURCE_BASE + path for path in SOURCES] + (
@@ -265,8 +275,10 @@ def _cookie_manager(parent: ET.Element) -> None:
               "org.apache.jmeter.protocol.http.control.HC4CookieHandler")
 
 
-def _thread_group(parent: ET.Element) -> ET.Element:
-    group, subtree = _component(parent, "ThreadGroup", "ThreadGroupGui", "DebugTG")
+def _thread_group(parent: ET.Element, *, setup: bool = False) -> ET.Element:
+    group, subtree = _component(parent, "SetupThreadGroup" if setup else "ThreadGroup",
+                               "SetupThreadGroupGui" if setup else "ThreadGroupGui",
+                               extensions.SETUP_GROUP if setup else "DebugTG")
     _property(group, "ThreadGroup.on_sample_error", "continue")
     _property(group, "ThreadGroup.num_threads", "1")
     _property(group, "ThreadGroup.ramp_time", "0")
@@ -355,11 +367,12 @@ def _sampler(parent: ET.Element, request: NativeRequest, ordinal: int,
     return sampler
 
 
-def _jsr223(parent: ET.Element, kind: str, name: str, config: str) -> ET.Element:
+def _jsr223(parent: ET.Element, kind: str, name: str, config: str,
+            script: str = runtime.SCRIPT) -> ET.Element:
     node, _ = _component(parent, kind, "TestBeanGUI", name)
     for key, value in (("scriptLanguage", "groovy"), ("filename", ""),
                        ("cacheKey", RUNTIME_PROFILE), ("parameters", config),
-                       ("script", runtime.SCRIPT)):
+                       ("script", script)):
         _property(node, key, value)
     return node
 
@@ -373,6 +386,7 @@ def _attach_runtime(root: ET.Element, plan: RuntimePlan, configs: dict[tuple[str
     init = _jsr223(temporary, "JSR223Sampler", "Runtime iteration", configs["iteration_start", ""])
     debug[0:0] = list(temporary)
     locations = {("iteration_start", ""): [PLAN_NAME, "DebugTG", init.attrib["testname"]]}
+    _extension_setup(root, plan, configs, locations)
     request_maps = {row["entity_id"]: row for row in maps if row["kind"] == "request"}
     for sampler in root.iter("HTTPSamplerProxy"):
         identifier = sampler.find("stringProp[@name='TestPlan.comments']")
@@ -381,6 +395,22 @@ def _attach_runtime(root: ET.Element, plan: RuntimePlan, configs: dict[tuple[str
         path = cast(list[str], cast(dict[str, JSONValue], row["locator"])["component_path"])
         _runtime_processors(branches[sampler], identifier.text, path, configs, locations)
     maps.extend(runtime.source_maps(plan, locations, ARTIFACT))
+    maps.extend(extensions.source_maps(plan, locations, ARTIFACT))
+
+
+def _extension_setup(root: ET.Element, plan: RuntimePlan, configs: dict[tuple[str, str], str],
+                     locations: dict[tuple[str, str], list[str]]) -> None:
+    if not extensions.enabled(plan):
+        return
+    temporary = ET.Element("hashTree")
+    branch = _thread_group(temporary, setup=True)
+    _jsr223(branch, "JSR223Sampler", extensions.SETUP_NAME, configs[extensions.SETUP_EVENT, ""],
+            extensions.SETUP_SCRIPT)
+    parent = root.find("./hashTree/hashTree")
+    assert parent is not None
+    parent[0:0] = list(temporary)
+    locations[extensions.SETUP_EVENT, ""] = [
+        PLAN_NAME, extensions.SETUP_GROUP, extensions.SETUP_NAME]
 
 
 def _runtime_processors(branch: ET.Element, request_id: str, path: list[str],

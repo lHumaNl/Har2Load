@@ -6,6 +6,8 @@ from typing import cast
 from urllib.parse import quote, quote_plus
 
 from har2load.domain import Diagnostic, JSONValue
+from har2load.extension_runtime import capability_diagnostics
+from har2load.extension_runtime import declarations as extension_records
 from har2load.extraction import MAX_MATCHES, parse_json_path
 from har2load.loadrunner_json import parser_lines
 from har2load.runtime_types import (
@@ -22,17 +24,21 @@ DOC_PATHS = (
     "web/lrFr_web_reg_save_param_ex.htm", "web/lrFr_web_set_max_html_param_len.htm",
     "c_vuser/lrFr_lr_eval_string_ext.htm", "c_vuser/lrFr_lr_eval_string_ext_free.htm",
     "c_vuser/lrFr_lr_save_string.htm",
-    "c_vuser/lrFr_lr_end_transaction.htm", "c_vuser/lrFr_lr_error_message.htm",
+    "c_vuser/lrFr_lr_end_transaction.htm", "c_vuser/lrFr_lr_output_message.htm",
+    "c_vuser/lrFr_lr_error_message.htm",
 )
 LIMITATIONS = (
-    "Literal/extracted scalars only; external/generated/agent-code sources blocked.",
+    "Literal/extracted scalars and opted-in scalar_body_v1 bodies; external/generated blocked.",
+    "Authored bodies are not sandboxed; no crash, undefined-behavior or loop containment.",
+    "Dependencies are unsupported; helper contracts and native effects remain author-owned.",
     "Body boundary_v1 and strict scalar JSON subset only; header/cookie extractors blocked.",
     "UTF-8 without NUL; response transcoding/native buffer semantics unverified.",
     "JSON: depth 64, 4096 nodes, 1024 keys/object, absolute exponent <=10000.",
     "C static state requires native per-Vuser isolation; template verification pending.",
     f"Values <= {MAX_RUNTIME_VALUE_BYTES} bytes; bodies/fields <= {MAX_RUNTIME_FIELD_BYTES} bytes.",
     "Unsafe live headers become markers; failed JSON scalars become quoted ERROR_name strings.",
-    "Header rejection is binding-local; correlation errors explicitly fail affected transactions.",
+    "Header rejection is binding-local; correlation errors log markers, transactions use LR_AUTO.",
+    "Diagnostics use lr_output_message; lr_error_message can fail open native transactions.",
     "Fields use worst-case encoded slot sizes; small live values may still be blocked.",
     "Numeric lexemes retained without binary floating-point conversion.",
     "No complete VuGen project, agreed version, native compilation or wire verification.",
@@ -45,9 +51,10 @@ _HELPERS = r'''
 #include <string.h>
 typedef struct { char *data; const char *error; int type, integral; } h2l_value;
 typedef struct { char *data; size_t size, capacity; int failed; } h2l_buffer;
+/* Historical diagnostic flag only; never used to override native transaction status. */
 static int h2l_transaction_failed = 0;
 static void h2l_fail(const char *message)
-{ h2l_transaction_failed = 1; lr_error_message("%s", message); }
+{ h2l_transaction_failed = 1; lr_output_message("%s", message); }
 static void h2l_reset(h2l_value *v)
 { free(v->data); v->data = NULL; v->type = 0; v->integral = 0; }
 static void h2l_error(h2l_value *v) { h2l_reset(v); h2l_fail(v->error); }
@@ -203,9 +210,10 @@ def scalar(value: JSONValue) -> str:
     return value if isinstance(value, str) else canonical_bytes(value).decode("utf-8")
 
 
-def _variable_errors(variable: dict[str, JSONValue]) -> Iterator[Diagnostic]:
+def _variable_errors(variable: dict[str, JSONValue], authored: bool) -> Iterator[Diagnostic]:
     source = obj(variable["source"])
-    if source["kind"] not in ("literal", "extracted"):
+    if source["kind"] not in ("literal", "extracted") and not (
+            authored and source["kind"] == "agent_code"):
         yield _error("SOURCE_UNSUPPORTED", identifier(variable))
     if source["kind"] == "literal":
         value = scalar(source["value"])
@@ -241,7 +249,9 @@ def _extractor_errors(ext: dict[str, JSONValue]) -> Iterator[Diagnostic]:
 
 
 def diagnostics(runtime: RuntimePlan) -> tuple[Diagnostic, ...]:
-    errors = [e for v in runtime.variables for e in _variable_errors(v)]
+    authored = bool(extension_records(runtime, "loadrunner", "blocks"))
+    errors = [e for v in runtime.variables for e in _variable_errors(v, authored)]
+    errors.extend(capability_diagnostics(runtime, "loadrunner"))
     for ext in runtime.extractors:
         errors.extend(_extractor_errors(ext))
     for request in runtime.requests:
@@ -308,7 +318,7 @@ def event_lines(runtime: RuntimePlan, event: str, exchange: str | None = None) -
     for variable in runtime.variables:
         init = obj(variable["initialize"])
         if (init["event"] == event and init.get("exchange_id") == exchange
-                and obj(variable["source"])["kind"] != "extracted"):
+                and obj(variable["source"])["kind"] not in ("extracted", "agent_code")):
             yield f"    {symbol('INIT_FN', identifier(variable))}(NULL);"
 
 

@@ -1,6 +1,7 @@
 """Actual generated Action/init/end execution against deliberate, non-SDK stubs."""
 
 from dataclasses import replace
+from pathlib import Path
 from subprocess import CalledProcessError
 
 import pytest
@@ -93,7 +94,7 @@ int main(void) {{
     assert(request_count == 6 && transaction_count == 4);
     assert(!strcmp(requests[4].body, "\\\"ERROR_token\\\""));
     assert(!strcmp(requests[5].body, "\\\"ERROR_token\\\""));
-    assert(transactions[2] == LR_FAIL && transactions[3] == LR_FAIL);
+    assert(transactions[2] == LR_AUTO && transactions[3] == LR_AUTO);
     assert(eval_calls == 1 && eval_frees == 1);
     assert(cookie_cleanups == 2 && cache_cleanups == 2);
     assert(vuser_end() == 0); assert(live_allocations == 0);
@@ -114,7 +115,9 @@ int main(void) {{
     assert(request_count == 6);
     assert(!strcmp(requests[4].body, "\\\"ERROR_token\\\""));
     assert(!strcmp(requests[5].body, "\\\"ERROR_token\\\""));
-    assert(transactions[2] == LR_FAIL && transactions[3] == LR_FAIL);
+    assert(transactions[2] == LR_AUTO && transactions[3] == LR_AUTO);
+    assert(requests[3].status == (fail_http_at == 3 ? LR_FAIL : LR_PASS));
+    assert(requests[4].status == LR_PASS && requests[5].status == LR_PASS);
     assert(eval_calls == eval_frees); vuser_end(); assert(live_allocations == 0);
     puts("LIFECYCLE_OK"); return 0;
 }}
@@ -133,7 +136,7 @@ int main(void) {{
     assert(!strcmp(requests[1].url, "https://synthetic.invalid/a%20b/a%20b%2F%C3%A9%25%5C%0D%0A%22?q=a+b%2F%C3%A9%25%5C%0D%0A%22"));
     assert(!strcmp(requests[1].body, requests[2].body));
     assert(strstr(requests[2].body, "ERROR_token") == NULL);
-    assert(transactions[0] == LR_FAIL && transactions[1] == LR_AUTO);
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     assert(!strcmp({symbol('VALUE', 'token')}()->data, {literal(value)}));
     vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
 }}
@@ -141,15 +144,15 @@ int main(void) {{
 
 
 @pytest.mark.parametrize("failure", ["header_rc = LR_FAIL", "save_fail_at = 1"])
-def test_service_failures_explicitly_fail_only_affected_transaction(tmp_path, failure):
+def test_service_failures_log_without_overriding_transaction_status(tmp_path, failure):
     execute(tmp_path, plan(header=True), f"""
 int main(void) {{
     stub_reset(); vuser_init(); {response_setup('{"token":"fresh"}')}
     {failure}; Action();
-    assert(request_count == 3 && error_calls > 0);
+    assert(request_count == 3 && output_calls > 0 && error_calls == 0);
     assert(!strcmp(requests[1].body, "\\\"fresh\\\""));
     assert(!strcmp(requests[2].body, "\\\"fresh\\\""));
-    assert(transactions[0] == LR_FAIL && transactions[1] == LR_AUTO);
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
 }}
 """)
@@ -169,8 +172,8 @@ int main(void) {{
     Action(); assert(request_count == 3);
     assert(!strcmp(requests[1].body, "\\\"fresh\\\""));
     assert(!strcmp(requests[2].body, "\\\"fresh\\\""));
-    assert(error_calls > 0);
-    assert(transactions[0] == LR_FAIL && transactions[1] == LR_AUTO);
+    assert(output_calls > 0 && error_calls == 0);
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
 }}
 """)
@@ -199,7 +202,7 @@ int main(void) {{
     Action(); assert(request_count == 3 && transaction_count == 2);
     assert(!strcmp(requests[0].body, "[\\\"ERROR_session\\\",\\\"ERROR_iteration\\\"]"));
     assert(!strcmp(requests[2].body, "[\\\"first\\\",\\\"first\\\"]"));
-    assert(transactions[0] == LR_FAIL && transactions[1] == LR_AUTO);
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     {response_setup('{"token":"second"}')}
     Action(); assert(request_count == 6 && transaction_count == 4);
     if (strcmp(requests[3].body, "[\\\"first\\\",\\\"ERROR_iteration\\\"]")) {{
@@ -207,7 +210,7 @@ int main(void) {{
         return 3;
     }}
     assert(!strcmp(requests[5].body, "[\\\"second\\\",\\\"second\\\"]"));
-    assert(transactions[2] == LR_FAIL && transactions[3] == LR_AUTO);
+    assert(transactions[2] == LR_AUTO && transactions[3] == LR_AUTO);
     assert(eval_calls == 2 && eval_frees == 2);
     vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
 }}
@@ -216,6 +219,31 @@ int main(void) {{
 
 def test_early_consumer_distinguishes_session_retention_from_iteration_reset(tmp_path):
     execute(tmp_path, early_consumer_plan(), early_consumer_checks())
+
+
+@pytest.mark.parametrize("original_call,mutated_call", [
+    ('lr_end_transaction("TC_0001", LR_AUTO);', 'lr_end_transaction("TC_0001", LR_FAIL);'),
+    ('lr_output_message("%s", message);', 'lr_error_message("%s", message);'),
+])
+def test_policy_control_detects_transaction_override_or_error_logging(
+    tmp_path: Path, original_call: str, mutated_call: str,
+) -> None:
+    checks = early_consumer_checks().replace(
+        "assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);",
+        'if (transactions[0] != LR_AUTO || error_calls) { '
+        'fputs("STATUS_OVERRIDE_OR_ERROR_LOG\\n", stderr); return 3; }')
+    lifecycle_binary(tmp_path, early_consumer_plan(), checks)
+    action = tmp_path / "Action.c"
+    original = action.read_text()
+    (tmp_path / "Action.original.c").write_text(original)
+    assert original_call in original
+    action.write_text(original.replace(original_call, mutated_call, 1))
+    binary = compile_source(tmp_path, (tmp_path / "driver.c").read_text())
+    with pytest.raises(CalledProcessError) as failure:
+        run_isolated([str(binary)], tmp_path)
+    assert failure.value.returncode == 3
+    assert "STATUS_OVERRIDE_OR_ERROR_LOG" in failure.value.stderr
+    (tmp_path / "expected-mutation-failure.txt").write_text(failure.value.stderr)
 
 
 def test_early_consumer_control_detects_removed_action_start_reset(tmp_path):
@@ -272,7 +300,7 @@ int main(void) {{
     assert(!strcmp(requests[1].url, "https://synthetic.invalid/SESSION/ITERATION/REQUEST/AFTER"));
     assert(!strcmp(requests[2].url, "https://synthetic.invalid/SESSION/ITERATION/ERROR_request/AFTER"));
     assert({access['request']}->data == NULL);
-    assert(transactions[0] == LR_AUTO && transactions[1] == LR_FAIL);
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     /* Iteration literal must be reinitialized; after_response literal runs despite failed HTTP. */
     h2l_set({access['iteration']}, "STALE", 5, 1, 0); h2l_reset({access['after']});
     fail_http_at = request_count; Action();
@@ -288,7 +316,7 @@ int main(void) {{
 """)
 
 
-def test_every_runtime_allocation_failure_is_bounded_clean_and_marks_failure(tmp_path):
+def test_every_runtime_allocation_failure_is_clean_and_logs_without_status_override(tmp_path):
     extra = (variable("session", scope="session", reset="session_start",
                       source={"kind": "literal", "value": "fixed"},
                       initialize={"event": "session_start"}),
@@ -305,9 +333,12 @@ int main(void) {{
         vuser_init(); {response_setup('{"token":"fresh"}')}
         Action();
         assert(request_count == 3 && transaction_count == 2);
-        assert(error_calls > 0);
-        assert(transactions[0] == LR_FAIL || transactions[1] == LR_FAIL);
-        if (fault < 2) assert(transactions[0] == LR_FAIL); /* session/iteration initialization */
+        assert(output_calls > 0 && error_calls == 0);
+        assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
+        if (fault < 2) {{ /* session/iteration initialization remains an error marker */
+            assert({symbol('VALUE', 'session')}()->data == NULL ||
+                   {symbol('VALUE', 'iteration')}()->data == NULL);
+        }}
         assert(strstr(requests[1].body, "STALE") == NULL);
         assert(eval_calls == eval_frees);
         vuser_end(); assert(live_allocations == 0);
@@ -332,7 +363,7 @@ int main(void) {{
     Action(); assert(request_count == 3);
     assert(!strcmp(requests[1].body, {literal(expected)}));
     assert(!strcmp(requests[2].body, {literal(expected)}));
-    assert(transactions[0] == {"LR_FAIL" if "ERROR_token" in expected else "LR_AUTO"});
+    assert(transactions[0] == LR_AUTO && transactions[1] == LR_AUTO);
     vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
 }}
 """)

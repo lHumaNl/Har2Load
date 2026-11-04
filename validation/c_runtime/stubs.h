@@ -31,7 +31,7 @@ static size_t response_size;
  * This deliberately small contract is NOT an SDK response/capture emulator. */
 static const unsigned char *scheduled_response = (const unsigned char *)"";
 static size_t scheduled_response_size;
-static int eval_rc, eval_calls, eval_frees, error_calls, save_calls;
+static int eval_rc, eval_calls, eval_frees, error_calls, output_calls, save_calls;
 static int save_fail_at = -1, register_rc, max_length_rc, header_rc, http_rc;
 static int fail_http_at = -1, request_count, transaction_count;
 static int cookie_cleanups, cache_cleanups, option_calls, continue_calls;
@@ -56,7 +56,7 @@ static void publish_parameter(const unsigned char *bytes, size_t length) {
 static void stub_reset(void) {
     response = (const unsigned char *)""; response_size = 0;
     scheduled_response = (const unsigned char *)""; scheduled_response_size = 0;
-    eval_rc = eval_calls = eval_frees = error_calls = save_calls = 0;
+    eval_rc = eval_calls = eval_frees = error_calls = output_calls = save_calls = 0;
     save_fail_at = fail_http_at = -1;
     register_rc = max_length_rc = header_rc = http_rc = 0;
     request_count = transaction_count = cookie_cleanups = cache_cleanups = 0;
@@ -66,8 +66,11 @@ static void stub_reset(void) {
     alloc_attempts = 0; alloc_fail_at = -1;
 }
 int lr_error_message(const char *format, ...) {
-    /* Logging must NOT implicitly change a transaction's status in these stubs. */
+    /* Native error logging can fail open transactions; tests reject any such call. */
     (void)format; ++error_calls; return 0;
+}
+int lr_output_message(const char *format, ...) {
+    (void)format; ++output_calls; return 0;
 }
 int lr_eval_string_ext(const char *name, int length, char **out,
                        unsigned long *n, int a, int b, int c) {

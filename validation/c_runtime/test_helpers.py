@@ -3,17 +3,48 @@
 import json
 import random
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import quote, quote_plus
 
 import pytest
 
 from har2load.extraction import MAX_MATCHES
-from validation.c_runtime.harness import helper_binary, hx, json_case, result, run_cases
+from har2load.loadrunner_runtime import helpers
+from validation.c_runtime.harness import (
+    POSTLUDE,
+    PRELUDE,
+    compile_source,
+    helper_binary,
+    hx,
+    isolated,
+    json_case,
+    result,
+    run_cases,
+)
 
 
 @pytest.fixture(scope="module")
 def binary(tmp_path_factory):
     return helper_binary(tmp_path_factory.mktemp("emitted-helpers"))
+
+
+def test_failure_flags_are_diagnostic_only_and_use_non_error_logging(tmp_path: Path) -> None:
+    checks = r'''
+int main(void) {
+    h2l_value value = {NULL, "ERROR_token", 0, 0}; h2l_buffer buffer;
+    stub_reset(); h2l_set(&value, "fresh", 5, 1, 0); h2l_error(&value);
+    assert(value.data == NULL && h2l_transaction_failed == 1);
+    assert(output_calls == 1 && error_calls == 0 && transaction_count == 0);
+    h2l_open(&buffer, H2L_VALUE_LIMIT); h2l_slot(&buffer, &value, 4);
+    assert(!strcmp(buffer.data, "\"ERROR_token\""));
+    assert(output_calls == 2 && error_calls == 0 && transaction_count == 0);
+    test_free(buffer.data); assert(live_allocations == 0); return 0;
+}
+'''
+    source = PRELUDE + "\n".join(helpers()) + POSTLUDE + checks
+    executable = compile_source(tmp_path, source)
+    execution = isolated([executable], tmp_path)
+    assert not execution.stdout and not execution.stderr
 
 
 def test_root_scalars_exact_numbers_and_strict_acceptance(binary):

@@ -225,7 +225,7 @@ class WorkspaceStore:
             or not _positive_revision(manifest.get("scenario_revision"))
             or manifest.get("producer_version") not in (
                 ("0.1.0a1",) if version == "1.0" else (
-                    "0.2.0a1", "0.3.0a1", "0.4.0a1", "0.5.0a1", "0.6.0a1", __version__
+                    "0.2.0a1", "0.3.0a1", "0.4.0a1", "0.5.0a1", "0.6.0a1", "0.7.0a1", __version__
                 )
             )
             or manifest.get("redaction") != "off"

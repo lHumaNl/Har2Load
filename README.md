@@ -36,23 +36,28 @@ application does not contain an LLM client or contact captured endpoints.
   JMX and intermediate LoadRunner C source, per-target capability errors and digest-linked reports.
 - Scalar runtime artifact profile: literal/extracted variables, body JSON/boundary extraction,
   lifecycle actions and exact request templates, with explicit failure markers and source maps.
+- Explicit `scalar_body_v1` Groovy/C wrappers, JMeter setup helper registry, typed helper
+  calls and per-output publication; correlation markers never override native result status.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
-external/generated source execution, code/helper runtime wrappers, response-header/cookie runtime
+external/generated source execution, response-header/cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.7.0a1` writes workspace schema `2.0` with scenario
-schema `1.3`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
+interchange format. Version `0.8.0a1` writes workspace schema `2.0` with scenario
+schema `1.4`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
 rejected; no workspace is silently migrated.
 Existing `0.3.0a1`/`0.4.0a1` scenarios 1.2 remain readable/editable with their previous
 operations. Target extensions and `agent_code` require an explicit `upgrade_extensions`
-change to scenario 1.3. Reads never perform this upgrade.
-Existing `0.5.0a1`/`0.6.0a1` workspaces are readable/editable without another schema upgrade.
+change to scenario 1.3. Explicit wrapper ABI opt-in additionally requires
+`upgrade_extension_runtime` to scenario 1.4. Reads never perform these upgrades;
+upgrading never opts existing opaque source into wrappers automatically.
+Existing `0.5.0a1`/`0.6.0a1`/`0.7.0a1` workspaces remain readable/editable for their
+previous operations without an upgrade; wrapper opt-in requires the explicit 1.4 transition.
 
 ## Install
 
@@ -195,6 +200,7 @@ Supported operations (unknown keys/operations are rejected):
 | `clear_resolution` | `exchange_id`, `location` | Remove a choice as a new, audited change |
 | `upgrade_parameters` | none | Explicitly upgrade scenario 1.1 to 1.2 within a revision |
 | `upgrade_extensions` | none | Explicitly upgrade scenario 1.2 to 1.3 within a revision |
+| `upgrade_extension_runtime` | none | Explicitly upgrade scenario 1.3 to 1.4 without opting existing source into wrappers |
 | `upsert_variable` / `upsert_extractor` / `upsert_binding` | `variable` / `extractor` / `binding` | Add or replace a complete typed declaration |
 | `remove_variable` / `remove_extractor` / `remove_binding` | `id` | Remove a declaration without cascading deletion |
 | `upsert_code_block` / `upsert_helper` | `block` / `helper` | Store a complete opaque target declaration and derive its source digest |
@@ -278,8 +284,9 @@ variables/lifecycle processors. Reports explicitly mark folded variables/lifecyc
 actions and map each binding to the generated request component. Literal values are
 therefore not populated as named runtime variables in Debug Sampler. Any external,
 generated, extracted or agent-code variable, and even an unreferenced extractor,
-blocks this static profile rather than silently dropping its contract. Target-local
-code/helper declarations block that target until runtime wrappers are implemented.
+blocks this static profile rather than silently dropping its contract. Code/helper
+declarations select runtime lowering even without variables or bindings. Opaque
+declarations without an explicit supported ABI block only their affected target.
 
 Managed-header policy `managed_headers_v1` omits Host, Content-Length, Connection,
 Keep-Alive, Transfer-Encoding, TE, Trailer, Upgrade, Proxy-Connection and fields named
@@ -409,9 +416,10 @@ are not fallback live values. Unbound fields remain capture-derived data.
 - Runtime binding to Content-Type, Content-Encoding, authentication, cookies or
   managed/Connection-nominated headers is blocked. Header names remain static.
   Unsafe live header values become binding error markers, not injected header lines.
-- External/generated/agent-code sources and code/helper wrappers remain unsupported
-  and block generation explicitly—even when unbound. No environment, external file,
-  random generator or authored code is evaluated during preparation.
+- External/generated sources remain unsupported and block generation even when
+  unbound. Agent-code producers require an explicitly opted-in supported target
+  wrapper. No environment, external file, random generator or authored code is
+  evaluated during preparation; declared dependencies are not read or downloaded.
 - Response-header/cookie runtime extraction is blocked rather than treating native
   normalized headers or a persistent cookie jar as equivalent to HAR response arrays.
 
@@ -437,14 +445,15 @@ to failure. It is not typed success, null/zero substitution, or permission to ch
 successful JSON types. A legitimate extracted string equal to `ERROR_<name>` remains
 distinguishable internally from failure.
 
-JMeter marks affected native samples unsuccessful after independent extraction and
-initialization checks finish; preprocessor binding failures are carried to the
-consumer sample. LoadRunner explicitly ends affected transactions with `LR_FAIL`,
-without depending on the optional "Fail open transactions on lr_error_message"
-setting. Failed initialization before a transaction opens is preserved for the first
-group; later consumers of a failed variable also fail their transaction. These marks
-do not abort the remaining requests. Rejection at one header binding does not erase
-an otherwise-valid scalar used by JSON/text/path bindings.
+**`markers_only_native_status_v1` (owner-approved policy change in 0.8):** extraction,
+initialization, binding, block and helper errors change variable state and diagnostics,
+not native sample/transaction success. JMeter adds no correlation failure assertion
+and never forces a result successful or unsuccessful. LoadRunner ends transactions
+with `LR_AUTO` and logs generated correlation diagnostics through `lr_output_message`,
+not `lr_error_message` (which can fail transactions through a runtime setting).
+Native transport errors and user-authored assertions are not hidden or forced green.
+This supersedes 0.7's explicit native failure marking; regenerate artifacts to adopt
+the new policy. Rejection at one header binding does not erase a valid shared scalar.
 
 ### Native construction and verification boundary
 
@@ -480,12 +489,14 @@ live values are small—for example, three maximum-size JSON slots exceed 1 MiB.
 Native representation details such as numeric spelling/negative zero may differ;
 successful JSON numeric values are not intentionally converted through binary floats.
 
-The runtime report uses schema **1.3**; static generation remains 1.2 and ordinary
+The runtime report uses schema **1.4**; static generation remains 1.2 and ordinary
 model-only `report` remains 1.1. Runtime maps link each variable, initializer, reset,
 extractor and binding to actual native locations and file hashes; missing, duplicate
 or unexpected declaration mappings refuse publication. Removed mappings remain in
 revision history. Reports disclose failure-wire policy and per-target implementation
-status separately from captured extraction checks.
+status separately from captured extraction checks. The scalar runtime profile now
+reports `profile_version: "2"` for the status-policy change. Authored wrappers use
+`authored_scalar_runtime_v1`, version 1, with `per_output_validated_v1` publication.
 
 **Runtime correctness/native compatibility is not certified by these artifacts.**
 The default Python `tests/` suite inspects structure, data, ordering and contracts;
@@ -775,7 +786,8 @@ support and the bounded regex profile remain future work in the full specificati
 
 ## Opaque target code and helpers
 
-This slice stores **contracts and source, not runnable generated artifacts**. No
+Declarations remain **unverified authored contracts and source**. Explicit ABI opt-in
+can additionally emit wrappers; opaque legacy declarations remain blocked. No
 Groovy/C interpreter, compiler, native validator, plugin loader or dependency
 resolver runs during import, changes, validation, inspection, analysis or report.
 Source is untrusted data. Structurally valid code may still be incorrect, unsafe,
@@ -788,10 +800,15 @@ New scenarios include `target_extensions: {blocks: [], helpers: []}`. On scenari
 selections, parameters and historical revisions are preserved. Upserts replace
 whole declarations; removal never cascades. All references are checked after the
 complete batch, so definitions may appear after their consumers in that batch.
+For scenario 1.3 use `{"op":"upgrade_extension_runtime"}` before adding
+`"runtime_abi":"scalar_body_v1"` to a block or helper. Earlier schemas require the
+preceding upgrades in order. The upgrade preserves source/digests and leaves ABI
+absent on existing declarations. Opt-in is a separate upsert, not inferred from code.
 
 ### Code blocks
 
-An authored `block` has exactly these fields (example is **not a working script**):
+An opaque authored `block` has exactly these fields (example is **not a working
+script**). Scenario 1.4 additionally permits the optional `runtime_abi` field:
 
 ```json
 {
@@ -828,19 +845,23 @@ remain in its declaration. Request-scoped inputs cannot cross exchanges.
 `depends_on` names same-target blocks at strictly earlier declared positions;
 `helper_calls` names same-target helpers. No call is inferred by scanning source.
 
-Scheduling is a **declared future-generator contract**: baseline variable and
+Scheduling is a **declared generator contract**: baseline variable and
 extractor actions precede code blocks at the same event; blocks run in ascending
 `order`, then before-request bindings read their saved outputs. Equal-event code
 inputs need an earlier same-target producer. Positions cannot share an order;
 use-before-initialization, cycles and duplicate writers are rejected. Initializers
 repeat each time their event occurs; no hidden once-only behavior is implied.
-Runtime enforcement of this schedule is not implemented yet.
+Explicit ABI wrappers implement this schedule; source semantics remain unverified.
 
 Only `mark_error_and_continue`, `skip_and_mark_outputs` and `reset_outputs: true`
-are accepted. Future wrappers must clear outputs, avoid stale values, skip a block
+are accepted. Wrappers clear outputs, avoid stale values, skip a block
 when a known failed input makes it unusable, mark outputs `ERROR_<variable>` and
-continue debugging. A marker is not a successfully typed value. Preparation does
-not simulate those wrappers or establish what an opaque source actually does.
+continue debugging. `mark_error_and_continue` describes variable errors, not native
+sample/transaction failure. Each validated output is published independently:
+already-valid outputs survive another output failure or a later handled body error.
+Missing/invalid outputs retain markers, and legitimate null differs from no output.
+A marker is not typed success. Preparation does not simulate the body. Wrappers
+are not fault containment for native crashes, undefined behavior or infinite loops.
 
 One implementation may be saved while the other is still missing. Storage and
 reports remain available; `validate` exits 3 and marks **only the missing target's
@@ -851,7 +872,8 @@ business behavior is not proven by matching `behavior_id`.
 
 ### Helpers and runtime dependencies
 
-An authored `helper` contains exactly:
+An opaque authored `helper` contains exactly the following fields; scenario 1.4
+also permits optional `runtime_abi: "scalar_body_v1"`:
 
 ```json
 {
@@ -871,8 +893,8 @@ form a same-target DAG, registered in deterministic topological order. Namespace
 symbol pairs must be unique per target; C symbols must also be unique across
 LoadRunner namespaces. Identifier spelling is checked, not native compilation.
 The intended placement is JMeter setup registry / LoadRunner helper definitions;
-no registry or function is created at preparation time. JMeter runtime code will
-remain inline in JMX, not external `.groovy` files.
+preparation emits source for registry/functions but never creates native runtime
+objects. JMeter code remains inline in JMX, not external `.groovy` files.
 
 `stateless: true` and `thread_safe: true` are required declarations, not verified
 properties. Helpers cannot declare `shared_state` effects. Other allowed effect
@@ -912,6 +934,99 @@ har2load inspect --workspace workspaces/demo --section extension-plan
 Default validation/summary omit source text and dependency paths. Explicit inspection
 and reports contain private source, effects, provenance, source digests, declared
 helper call sites, scheduling, and dependencies. They are not safe public handoffs.
+
+### `scalar_body_v1` invocation API
+
+Opted-in `source` is a **function body**, not a whole function, class or file.
+Existing source must be adapted explicitly; an ABI-only upsert does not rewrite it.
+The body remains opaque during preparation—even syntactically invalid code can be
+serialized. Any declared external dependency currently blocks wrapper generation;
+it is not silently ignored, fetched or bundled. Full source is private report/artifact
+data, never included in public generation-summary metadata.
+
+**JMeter:** the generated `Authored setup` group compiles source from base64 JMX
+configuration into isolated classes once per run and replaces a revision-specific
+registry in `props`. No external `.groovy` files or per-request compilation are used.
+Base64 prevents JMeter `${...}` expansion from changing source; Groovy string rules
+still apply. Shared helper implementations do not inherit setup-thread bindings.
+
+Block bodies receive `inputs` (read-only variable-ID map), `emit`, `helpers`
+(declared helper-ID callables), and `context` (explicit native `vars`, `ctx`, `prev`,
+`sampler`, `log`). For declared input `raw`, output `normalized`, and helper `clean`:
+
+```groovy
+emit('normalized', helpers.clean(inputs.raw))
+```
+
+The helper's arguments are positional in declared parameter order. A string helper
+with parameter `text` could have this body:
+
+```groovy
+return inputs.text.trim()
+```
+
+Helpers receive only `inputs` (parameter-name map) and their declared dependency
+`helpers`. Arguments and return values are validated; `void` requires null.
+Block return values are ignored: only explicit `emit` publishes outputs. Strings
+must be `String`, not GString; numbers accept BigDecimal, BigInteger and boxed
+integral types, not Float/Double or numeric strings. Boolean/null remain distinct.
+Use `.toString()` explicitly for intended GStrings. Strict UTF-8 and scalar limits
+apply. A missing output differs from an explicitly emitted null.
+
+**LoadRunner:** bodies are inserted into hashed static functions with an
+`h2l_frame *frame` argument. Return 1 for success, 0 for a reported failure;
+falling through returns 1. Helper declaration names never become unchecked C
+function identifiers. The supported body API is:
+
+```c
+const h2l_value *h2l_input(h2l_frame *frame, const char *id);
+int h2l_emit_text(h2l_frame *frame, const char *id, const char *text);
+int h2l_emit_text_n(h2l_frame *frame, const char *id, const char *text, size_t n);
+int h2l_emit_json(h2l_frame *frame, const char *id, const char *json);
+int h2l_emit_json_n(h2l_frame *frame, const char *id, const char *json, size_t n);
+int h2l_call_helper(h2l_frame *frame, const char *helper_id,
+                    const h2l_value *const *arguments, size_t count, h2l_value *out);
+void h2l_release(h2l_value *value);
+```
+
+Block inputs/outputs use variable IDs. Helper inputs use parameter names, and a
+non-void helper publishes its one result with output ID `result`. Text emit copies
+a string; JSON emit parses one complete scalar and validates its type. Numbers
+retain exact JSON lexemes; numeric strings are not silently converted. Both inputs
+are bounded to 65,536 bytes and reject NUL. A string-copy helper body can be:
+
+```c
+const h2l_value *value = h2l_input(frame, "text");
+if (!value) return 0;
+return h2l_emit_text(frame, "result", value->data);
+```
+
+Inputs are borrowed/read-only; never free or mutate them. `data == NULL` means
+unavailable, not JSON null. For helper calls, pass a separate zero-initialized
+`h2l_value result = {0}`, then call `h2l_release(&result)` on all paths. Non-void
+calls require an output; void calls allow NULL. The argument array must contain
+at least `count` readable entries, even for rejected calls; pointers/allocation
+extents remain the author's responsibility. Helpers may call only declared
+dependencies. Calls validate arity/types and do not return stale results on failure.
+
+A block calling a declared string helper `clean` can use:
+
+```c
+h2l_value result = {0};
+const h2l_value *args[] = {h2l_input(frame, "raw")};
+int ok = h2l_call_helper(frame, "clean", args, 1, &result);
+if (ok) h2l_emit_text(frame, "normalized", result.data);
+h2l_release(&result);
+return ok;
+```
+
+**Both targets:** before every block invocation all outputs reset. Each valid emit
+commits only its own output; an invalid replacement invalidates only that slot.
+Other successful outputs survive later handled errors. No correlation error changes
+native sample/transaction status. Authors can still directly change native state or
+perform unsafe operations: these wrappers are not a sandbox, execution approval,
+fault-containment mechanism, or proof of declared thread safety. C allocation
+ownership and native Vuser isolation remain separate responsibilities/limitations.
 
 ## Preservation and limitations
 
@@ -1030,7 +1145,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.7.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.8.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

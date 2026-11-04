@@ -65,9 +65,11 @@ def test_two_target_scalar_runtime_generation_and_maps(tmp_path, value_type):
     assert written["data"]["report_sha256"] == checked["data"]["report_sha256"]
     report = json.loads((output / "report.json").read_bytes())
     manifest = json.loads((output / "manifest.json").read_bytes())
-    assert report["report_schema_version"] == "1.3"
+    assert report["report_schema_version"] == "1.4"
     assert report["generation"]["failure_wire_policy"] == "error_marker_json_string_v1"
     assert report["generation"]["runtime_validation"] == "not_run"
+    assert report["generation"]["native_status_policy"] == "markers_only_native_status_v1"
+    assert report["generation"]["profile_version"] == "2"
     assert report["variables"][0]["lifecycle"]["runtime_implementation"] == "target_specific"
     for target in ("jmeter", "loadrunner"):
         for kind, entity in (("variable", "v"), ("initialize", "v"), ("reset", "v"),
@@ -78,6 +80,7 @@ def test_two_target_scalar_runtime_generation_and_maps(tmp_path, value_type):
             assert rows[0]["status"] == "generated" and rows[0]["locator"]
             assert rows[0]["artifact_sha256"] == manifest["files"][rows[0]["artifact"]]
         assert report["targets"][target]["profile"] == "scalar_runtime_v1"
+        assert report["targets"][target]["profile_version"] == "2"
     assert report["targets"]["loadrunner"]["project_status"] == "incomplete"
     assert digest_tree(workspace) == before
 

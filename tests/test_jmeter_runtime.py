@@ -105,7 +105,9 @@ def test_unsupported_sources_block_even_unbound_variables(source: dict[str, JSON
     runtime = replace(candidate.runtime, variables=(*candidate.runtime.variables, unsupported))
     result = JMeterGenerator().generate(replace(candidate, runtime=runtime))
     assert result.status == "blocked" and not result.files and not result.source_map
-    assert any(d.code == "JMETER_RUNTIME_SOURCE_UNSUPPORTED" for d in result.diagnostics)
+    expected = ("GENERATION_EXTENSION_PRODUCER_UNSUPPORTED" if source["kind"] == "agent_code"
+                else "JMETER_RUNTIME_SOURCE_UNSUPPORTED")
+    assert any(d.code == expected for d in result.diagnostics)
 
 
 def test_runtime_generation_is_deterministic_and_never_reads_environment_or_executes(
@@ -408,12 +410,12 @@ def test_literal_initialization_after_response_does_not_require_http_success():
     assert "save(v, source.numeric ? decimal(source.value) : source.value)" in initialize
 
 
-def test_native_failure_marking_is_deferred_until_independent_checks_complete():
+def test_correlation_never_overrides_native_status_or_adds_assertions() -> None:
     script = prop(root(correlation()).find(".//JSR223PostProcessor"), "script")
     assert "def transportSucceeded = prev != null && prev.isSuccessful()" in script
     assert "def responseAvailable = { transportSucceeded }" in script
-    assert script.index("event('after_response')") < script.index("prev.setSuccessful(false)")
-    assert "state.requestErrors[cfg.request.id] = phaseFailed" in script
-    assert "if (!entry.ok) phaseFailed = true" in script
-    assert "SampleResult.setSuccessful(false)" in script
-    assert "AssertionResult('Har2Load runtime')" in script
+    assert script.index("def transportSucceeded") < script.index("extract()")
+    assert "setSuccessful(" not in script
+    assert "AssertionResult" not in script
+    assert "log.warn('ERROR_' + v.name)" in script
+    assert "log.warn('ERROR_BINDING_' + slot.binding_id)" in script

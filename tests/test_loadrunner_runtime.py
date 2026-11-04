@@ -331,22 +331,32 @@ def test_unreferenced_json_extractor_is_emitted_and_whole_document_validated() -
                for item in build.source_map)
 
 
-def test_runtime_failures_explicitly_fail_transactions_without_aborting_http():
+def test_runtime_failures_log_without_overriding_native_transactions() -> None:
     value = plan()
     source = LoadRunnerGenerator().generate(value).files[ACTION].decode()
     body = action(value)
-    assert 'lr_end_transaction("TC_0001", h2l_transaction_failed ? LR_FAIL : LR_AUTO)' in body
-    assert body.index("h2l_transaction_failed = 0;") > body.index("lr_end_transaction")
+    assert 'lr_end_transaction("TC_0001", LR_AUTO)' in body
+    assert "LR_FAIL" not in body
+    assert "lr_set_transaction_status" not in source
     assert "if (!v->data) h2l_fail(v->error)" in source
-    assert "h2l_transaction_failed = 1; lr_error_message" in source
+    assert "h2l_transaction_failed = 1; lr_output_message" in source
+    assert "lr_error_message" not in source
     assert "h2l_capture(h2l_ok && h2l_rc == LR_PASS)" in body
     assert "h2l_transaction_failed &&" not in body
     assert body.count("web_custom_request(") == 2
 
 
-def test_session_and_iteration_initialization_errors_survive_until_first_group():
+def test_runtime_metadata_cites_non_error_logging_api() -> None:
+    build = LoadRunnerGenerator().generate(plan())
+    assert any(source.endswith("/lrFr_lr_output_message.htm")
+               for source in build.metadata["sources"])
+    assert b"lrFr_lr_output_message.htm" in build.files["loadrunner/README.txt"]
+
+
+def test_iteration_initialization_does_not_override_first_group_status() -> None:
     var = variable(source={"kind": "literal", "value": "constant"},
                    initialize={"event": "iteration_start"})
     source = action(plan(var))
     assert source.index(symbol("INIT_FN", "token")) < source.index("lr_start_transaction")
     assert "h2l_transaction_failed = 0" not in source.split("lr_end_transaction", 1)[0]
+    assert 'lr_end_transaction("TC_0001", LR_AUTO)' in source

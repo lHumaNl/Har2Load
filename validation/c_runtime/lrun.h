@@ -7,6 +7,7 @@
 #define LR_ON_ERROR_CONTINUE 1
 #define LAST ((const char *)0)
 int lr_error_message(const char *, ...);
+int lr_output_message(const char *, ...);
 int lr_eval_string_ext(const char *, int, char **, unsigned long *, int, int, int);
 void lr_eval_string_ext_free(const char **);
 int lr_save_string(const char *, const char *);

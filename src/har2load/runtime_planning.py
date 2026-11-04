@@ -6,11 +6,13 @@ bindings at their original locations in selected views, never by sentinel matchi
 
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 from typing import cast
 from urllib.parse import urlsplit
 
 from har2load.binding_locations import BindingLocations, SourceViews
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
+from har2load.extensions import TargetExtensions
 from har2load.generation_types import NativeRequest, RequestPlan
 from har2load.materialization import RequestMaterializer
 from har2load.parameters import ParameterModel
@@ -206,8 +208,18 @@ class GenerationPlanner:
     ) -> RequestPlan:
         parameters = _obj(scenario.get("parameters", ParameterModel.empty()))
         variables, extractors = (_objects(parameters[k]) for k in ("variables", "extractors"))
-        if not extractors and all(_obj(v["source"])["kind"] == "literal" for v in variables):
+        extensions = _obj(scenario.get("target_extensions", TargetExtensions.empty()))
+        if (not any(extensions.values()) and not extractors
+                and all(_obj(v["source"])["kind"] == "literal" for v in variables)):
             return RequestMaterializer().build(capture, grouping, scenario)
+        ordering = _obj(TargetExtensions.plan(extensions, grouping)["targets"])
+        ordered: dict[str, tuple[dict[str, JSONValue], ...]] = {}
+        for kind in ("blocks", "helpers"):
+            index = {r["id"]: r for r in _objects(extensions[kind])}
+            ordered[kind] = tuple(deepcopy(index[r["id"]]) for target in ordering.values()
+                                  for r in _objects(_obj(target)[kind]))
+        empty_runtime = RuntimePlan(tuple(deepcopy(variables)), tuple(deepcopy(extractors)), (),
+            ordered["blocks"], ordered["helpers"], sha256(canonical_bytes(scenario)).hexdigest())
         # Remove declarations from a clone only to validate immutable request
         # prerequisites; runtime declarations are attached separately, never lost.
         base_model = deepcopy(scenario)
@@ -227,16 +239,14 @@ class GenerationPlanner:
                         raise _bad("GENERATION_RUNTIME_HEADER_UNSUPPORTED")
             BindingLocations().validate(parameters, capture, selections)
             if any(d.severity == "error" for d in base.diagnostics):
-                return replace(base, runtime=RuntimePlan(tuple(deepcopy(variables)),
-                               tuple(deepcopy(extractors)), ()))
+                return replace(base, runtime=empty_runtime)
             requests = []
             for request in base.requests:
                 selected = [b for b in bindings if b["exchange_id"] == request.id]
                 raw = _obj(_obj(views.exchange(request.id).raw)["request"])
                 requests.append(RuntimeRequest(request.id, _url(request, selected),
                     _headers(request, selected, raw), _body(request, selected)))
-            runtime = RuntimePlan(tuple(deepcopy(variables)), tuple(deepcopy(extractors)),
-                                  tuple(requests))
+            runtime = replace(empty_runtime, requests=tuple(requests))
             decisions: tuple[JSONValue, ...] = tuple({
                 "kind": "runtime_binding_planned", "binding_id": b["id"],
                 "variable_id": b["variable_id"], "exchange_id": b["exchange_id"],
@@ -246,4 +256,4 @@ class GenerationPlanner:
         except Har2LoadError as error:
             return replace(base, diagnostics=base.diagnostics + (
                 Diagnostic(error.code, "error", str(error)),),
-                runtime=RuntimePlan(tuple(deepcopy(variables)), tuple(deepcopy(extractors)), ()))
+                runtime=empty_runtime)

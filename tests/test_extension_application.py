@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -258,3 +259,59 @@ def test_retargeted_block_helper_and_calls_keep_removed_target_dispositions(tmp_
                    and row["disposition"] == "declared" for row in report["source_map"])
     assert report["diff"]["blocks"]["changed"] == ["code_jmeter"]
     assert report["diff"]["blocks"]["removed"] == []
+
+
+@pytest.fixture
+def legacy_extensions(tmp_path: Path) -> tuple[Application, Path, str]:
+    app, workspace, entity = setup(tmp_path)
+    scenario_path, manifest_path = workspace / "scenario.json", workspace / "manifest.json"
+    scenario = json.loads(scenario_path.read_bytes())
+    scenario["schema_version"] = "1.3"
+    encoded = canonical_bytes(scenario)
+    scenario_path.write_bytes(encoded)
+    manifest = json.loads(manifest_path.read_bytes())
+    digest = hashlib.sha256(encoded).hexdigest()
+    manifest["scenario_sha256"] = manifest["initial_scenario_sha256"] = digest
+    manifest_path.write_bytes(canonical_bytes(manifest))
+    ops = [*operations(entity), {"op": "upsert_helper", "helper": helper()}]
+    app.changes_apply(workspace, changes(tmp_path, entity, ops))
+    return app, workspace, entity
+
+
+def test_runtime_upgrade_preserves_opaque_history_and_is_idempotent(
+    tmp_path: Path, legacy_extensions: tuple[Application, Path, str],
+) -> None:
+    app, workspace, entity = legacy_extensions
+    old, before = app.store.load(workspace).scenario, tree(workspace)
+    source = changes(tmp_path, entity, [{"op": "upgrade_extension_runtime"}],
+                     base=2, identifier="runtime-upgrade")
+    assert app.changes_validate(workspace, source)["data"]["proposed_revision"] == 3
+    assert tree(workspace) == before
+    app.changes_apply(workspace, source)
+    assert app.store.load(workspace).scenario == {**old, "schema_version": "1.4", "revision": 3}
+    assert app.store.load(workspace, 2).scenario == old
+    assert app.store.load(workspace, 1).scenario["schema_version"] == "1.3"
+    assert all((workspace / name).read_bytes() == content
+               for name, content in before.items() if name != "manifest.json")
+    assert app.changes_apply(workspace, source)["data"]["replayed"] is True
+    assert len(app.store.load(workspace).history) == 2
+
+
+def test_abi_only_revision_preserves_report_history_and_original_upgrade_retry(
+    tmp_path: Path, legacy_extensions: tuple[Application, Path, str],
+) -> None:
+    app, workspace, entity = legacy_extensions
+    source = changes(tmp_path, entity, [{"op": "upgrade_extension_runtime"}],
+                     base=2, identifier="runtime-upgrade")
+    app.changes_apply(workspace, source)
+    before = app.report(workspace)["data"]["report_sha256"]
+    opt_in = changes(tmp_path, entity, [
+        {"op": "upsert_code_block", "block": {**block(entity), "runtime_abi": "scalar_body_v1"}},
+        {"op": "upsert_helper", "helper": {**helper(), "runtime_abi": "scalar_body_v1"}},
+    ], base=3, identifier="explicit-opt-in")
+    app.changes_apply(workspace, opt_in)
+    assert app.report(workspace)["data"]["report_sha256"] != before
+    assert app.report(workspace, revision=3)["data"]["report_sha256"] == before
+    assert app.changes_apply(workspace, source)["data"]["replayed"] is True
+    assert app.changes_apply(workspace, opt_in)["data"]["replayed"] is True
+    assert app.store.load(workspace).scenario_revision == 4

@@ -1,7 +1,7 @@
 """Offline scalar-runtime configuration and fixed inline Groovy, never a runner.
 
-Only literal/extracted sources are supported. Failed JSON bindings deliberately
-emit a string marker; successful scalars retain their types. Native parity is
+Literal/extracted sources and explicitly opted-in authored bodies are supported.
+Failed JSON bindings emit string markers; successful scalars retain their types. Native parity is
 unverified. Jackson Core 2.13.3 is already bundled in the JMeter 5.5 distribution.
 """
 
@@ -14,7 +14,9 @@ from decimal import Decimal
 from typing import cast
 from xml.sax.saxutils import escape
 
+from har2load import jmeter_extensions as extensions
 from har2load.domain import JSONValue
+from har2load.extension_runtime import capability_diagnostics
 from har2load.extraction import parse_json_path
 from har2load.runtime_types import (
     MAX_RUNTIME_FIELD_BYTES,
@@ -41,12 +43,13 @@ SOURCES = [
 ]
 LIMITATIONS = [
     "Runtime behavior/native loading/wire parity have not been verified.",
-    "External, generated, agent_code sources and authored extensions are unsupported.",
+    "External/generated sources and non-opted-in authored extensions are unsupported.",
+    "Authored scalar_body_v1 source is unsafe native code, not sandboxed or behavior-verified.",
     "Response header/cookie extraction is unsupported; native header normalization is unverified.",
     "Response bodies require strict UTF-8; absent charset means UTF-8, other charsets fail.",
     "Unsuccessful native HTTP samples fail extraction, including HTTP error responses.",
     "Failed JSON bindings emit ERROR_<name> strings, including numeric/boolean/null declarations.",
-    "Correlation/binding failures fail native samples after independent checks; loops continue.",
+    "Correlation/binding/initialization errors log markers without changing native sample status.",
     "Whole-field assembly failure emits an invalid-URL failed sample without sending HTTP.",
     "BigDecimal preserves numeric value, not spelling or the sign of zero; scale is bounded.",
     "Debug Sampler and View Results Tree expose private live values; redaction is off.",
@@ -63,9 +66,14 @@ def templates(request: RuntimeRequest) -> tuple[RuntimeTemplate, ...]:
 
 
 def validate_runtime(plan: RuntimePlan) -> None:
+    diagnostics = capability_diagnostics(plan, "jmeter")
+    if diagnostics:
+        raise RuntimeRejected(diagnostics[0].code)
     variables = {cast(str, v["id"]) for v in plan.variables}
     for variable in plan.variables:
-        if cast(dict[str, JSONValue], variable["source"])["kind"] not in {"literal", "extracted"}:
+        if cast(dict[str, JSONValue], variable["source"])["kind"] not in {
+            "literal", "extracted", "agent_code",
+        }:
             raise RuntimeRejected("JMETER_RUNTIME_SOURCE_UNSUPPORTED")
     for extractor in plan.extractors:
         if extractor["area"] != "response_body":
@@ -138,7 +146,8 @@ def configuration(plan: RuntimePlan, event: str, request: RuntimeRequest | None 
               "request": asdict(request) if request is not None else None, "event": event,
               "state_key": STATE_KEY, "value_limit": MAX_RUNTIME_VALUE_BYTES,
               "field_limit": MAX_RUNTIME_FIELD_BYTES, "match_limit": MAX_MATCHES,
-              "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL}
+              "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL,
+              "extensions": extensions.configuration(plan, setup=event == extensions.SETUP_EVENT)}
     return _encode_configuration(config, budget)
 
 
@@ -159,6 +168,8 @@ def prepare(plan: RuntimePlan, budget: int) -> dict[tuple[str, str], str]:
     validate_runtime(plan)
     events = [("iteration_start", None), *((event, request) for request in plan.requests
               for event in ("before_request", "after_response"))]
+    if extensions.enabled(plan):
+        events.insert(0, (extensions.SETUP_EVENT, None))
     script_size = len(escape(SCRIPT).encode("utf-8"))
     if len(events) * script_size > budget:
         raise RuntimeRejected("JMETER_OUTPUT_LIMIT")
@@ -245,13 +256,12 @@ import java.nio.CharBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.charset.CodingErrorAction
 import org.apache.jmeter.config.Arguments
-import org.apache.jmeter.assertions.AssertionResult
 import org.apache.jmeter.protocol.http.control.Header
 import org.apache.jmeter.protocol.http.control.HeaderManager
 
 def reader = new JsonSlurper().setCheckDates(false)
 def cfg = reader.parseText(new String(Base64.getDecoder().decode(Parameters), 'UTF-8'))
-def phaseFailed = false
+// Correlation consumes the native result but never overrides its success status.
 def transportSucceeded = prev != null && prev.isSuccessful()
 def fail = { throw new IllegalArgumentException('HAR2LOAD_RUNTIME_INVALID') }
 def utf8 = { String text, int maximum ->
@@ -281,7 +291,7 @@ def checked = { value, String type ->
 }
 def state = vars.getObject(cfg.state_key)
 if (state == null) {
-    state = [values: [:], errors: [:], requestErrors: [:], started: false]
+    state = [values: [:], errors: [:], started: false]
     vars.putObject(cfg.state_key, state)
 }
 def mark = { v ->
@@ -390,13 +400,13 @@ def extract = {
             results[e.id] = [ok: true, value: choose(e)]
             state.errors.remove(e.id)
         } catch (Exception ignored) {
-            phaseFailed = true
             state.errors[e.id] = 'ERROR_EXTRACTOR_' + e.id
             log.warn('ERROR_EXTRACTOR_' + e.id)
         }
     }
 }
 def initialize = { v ->
+    if (v.source.kind == 'agent_code') return
     mark(v)
     try {
         def source = v.source
@@ -407,7 +417,7 @@ def initialize = { v ->
             if (result == null || !result.ok) fail()
             save(v, result.value)
         }
-    } catch (Exception ignored) { phaseFailed = true; log.warn('ERROR_' + v.name) }
+    } catch (Exception ignored) { log.warn('ERROR_' + v.name) }
 }
 def event = { String name ->
     cfg.variables.findAll { it.reset == name }.each { mark(it) }
@@ -419,12 +429,11 @@ def encodeSlot = { slot ->
     def entry = state.values[slot.variable_id]
     def declaration = cfg.variables.find { it.id == slot.variable_id }
     if (entry == null) { mark(declaration); entry = state.values[slot.variable_id] }
-    if (!entry.ok) phaseFailed = true
+    if (!entry.ok) log.warn('ERROR_BINDING_' + slot.binding_id)
     def value = entry.ok ? entry.value : 'ERROR_' + declaration.name
     if (slot.encoding == 'json') return jsonScalar(value)
     def text = utf8(scalarText(value), cfg.value_limit as int)
     if (slot.encoding == 'header' && text.toCharArray().any { (int) it < 32 || (int) it >= 127 }) {
-        phaseFailed = true
         log.warn('ERROR_BINDING_' + slot.binding_id); text = 'ERROR_' + declaration.name
     }
     if (slot.encoding in ['path', 'form']) {
@@ -457,6 +466,7 @@ def assemble = {
     // Full URL avoids GET/DELETE query parsing. Assigned strings are not expressions.
     sampler.setPath(url)
 }
+__HAR2LOAD_EXTENSIONS__
 if (cfg.event == 'iteration_start') {
     if (!state.started) { event('session_start'); state.started = true }
     event('iteration_start')
@@ -465,24 +475,15 @@ if (cfg.event == 'iteration_start') {
     cfg.variables.findAll { it.source.kind == 'extracted' &&
         it.initialize.exchange_id == cfg.request.id }.each { mark(it) }
     event('before_request')
+    extensionRun()
     try { assemble() } catch (Exception ignored) {
-        phaseFailed = true
         sampler.setPath(cfg.failed_url)
         log.warn('ERROR_REQUEST_RUNTIME')
     }
-    state.requestErrors[cfg.request.id] = phaseFailed
 } else {
-    phaseFailed = state.requestErrors.remove(cfg.request.id) == true
     extract()
     event('after_response')
-    if (phaseFailed && prev != null) {
-        def assertion = new AssertionResult('Har2Load runtime')
-        assertion.setFailure(true)
-        assertion.setFailureMessage('ERROR_RUNTIME_CORRELATION_OR_BINDING')
-        prev.addAssertionResult(assertion)
-        prev.setSuccessful(false)
-    }
+    extensionRun()
 }
-if (cfg.event == 'iteration_start' && phaseFailed) SampleResult.setSuccessful(false)
 return null
-'''.lstrip()
+'''.lstrip().replace('__HAR2LOAD_EXTENSIONS__', extensions.RUNTIME_SCRIPT)

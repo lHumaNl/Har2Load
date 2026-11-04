@@ -45,7 +45,7 @@ must balance. This is not a general leak or resource-bound proof.
 | Boundary mistakes | First left/nearest right, nested lefts, exact cardinality, occurrence, empty policy, match/value overflow, generated boundary extraction |
 | Wire-value construction | Path/form/text/JSON/header encoding, literal URL segments, exact typed successes, quoted failure markers, present/non-NULL empty raw body |
 | Silent failures/stale state | Repeated Action calls, early consumer before producer distinguishing retained session from expired iteration state, producer invalidation, request expiration, session restart, after-response literals despite HTTP failure; negative control removes only the Action-start iteration reset |
-| Incorrect failure metrics | Binding-local header rejection without shared-value corruption; explicit LR_FAIL independent of logging; unbound extractor tested both bad-first and good-first, fresh good extraction still available, later clean group remains LR_AUTO |
+| Incorrect status overrides | Binding-local header rejection without shared-value corruption; all generated transaction endings use LR_AUTO; correlation diagnostics use non-error logging; bad-first/good-first extraction preserves valid values and native request results |
 | Capture ownership/errors | Scheduled HTTP data separate from evaluated parameter storage; registration-at-HTTP and one-shot publication controls; effective save/clear; non-terminated native buffers, explicit lengths, NUL/UTF-8/size rejection, release on failure, failed registration/max length/save/eval/HTTP, post-capture reset failure |
 | OOM/cleanup faults | Fail each emitted allocation in the successful lifecycle, parser allocation-failure sweep, no stale values, request continuation, transaction failure, balanced cleanup |
 | Parser surprises | 160 seeded structured cases plus truncated counterparts; 800 seeded ASCII mutation cases against independent Python JSON/Decimal, duplicate-key, Unicode/NUL oracles |
@@ -58,7 +58,8 @@ One explicit negative control removes exactly one Action-start iteration reset
 from a temporary synthetic generated artifact; it must fail the early-consumer
 assertion with exit 3. The original artifact is retained. Production is never changed.
 Stubs snapshot request fields, headers and transaction status deterministically;
-logging alone cannot mark a transaction failed.
+tests reject generated `lr_error_message` calls because that API can fail native
+transactions through a runtime setting. Correlation uses `lr_output_message` instead.
 
 The capture contract intentionally distinguishes `scheduled_response` (HTTP fixture)
 from `response`/`response_size` (evaluated parameter view). Registration does not
@@ -76,7 +77,11 @@ not used to supply lifecycle responses: all lifecycle fixtures use scheduled dat
 and must pass through registration and HTTP publication. This small synthetic
 contract deliberately does not emulate all native SDK behavior.
 
-## Verification record (2026-11-04, Har2Load 0.7.0a1)
+## Historical verification record (2026-11-04, Har2Load 0.7.0a1)
+
+This record describes the accepted pre-0.8 source and its former native-failure
+policy. Current tests enforce the subsequent owner-approved marker-only policy;
+the old execution counts below are not evidence for newly changed source.
 
 - Apple clang 21.0.0 (`clang-2100.1.1.101`), `arm64-apple-darwin25.6.0`.
 - Original explicit suite: **35 passed** (16.20s), including independent fixture encoding.
@@ -127,3 +132,20 @@ no native leak detector; no exhaustive fuzzing. Stub semantics cannot establish
 real SDK return-value, allocation, encoding, or request behavior. Initialization
 options and cookie/cache service return values remain production-documented
 unchecked behavior, not newly certified reliability guarantees.
+
+## Authored wrappers and current-policy verification (0.8.0a1)
+
+`test_extensions.py` adds explicit `scalar_body_v1` bodies, helper dispatch/ownership,
+typed/null outputs, per-output commits, invalid replacement, skipped inputs,
+same-event chains, transport-status preservation, and allocation-failure controls.
+Every test uses newly authored synthetic source, not captured or customer code.
+The positive output-A/failed-output-B allocation case asserts both actual body
+values, native transaction policy, diagnostics, and balanced cleanup.
+
+Independent C review passed with notes; the lead reran the complete integrated suite
+in `wrappers-integrated-final`: **103 C tests passed**, within **105 total tests**
+including the two JMeter batches. Default suite: **1176 passed**; native disabled:
+**105 skipped**; Ruff/mypy passed. See [integrated record](../README.md).
+The C contract requires non-NULL helper argument arrays to contain at least `count`
+readable entries, including rejected calls; callers own pointer/allocation validity.
+This is not a claim that a wrapper can contain arbitrary C undefined behavior.
