@@ -2,6 +2,7 @@
 
 Initialization repeats at each declared event. Scope determines reset/visibility;
 it never implies a once-only guard. Preparation neither reads nor produces inputs.
+External initial_value strings are explicit native seeds, not typed runtime values.
 """
 
 import re
@@ -23,6 +24,7 @@ MAX_EXTRACTORS = 256
 MAX_BINDINGS = 1024
 MAX_PURPOSE_LENGTH = 1024
 MAX_LITERAL_LENGTH = 65536
+MAX_NATIVE_INPUT_BYTES = 65536
 MAX_GENERATED_LENGTH = 4096
 MAX_ALPHABET_LENGTH = 95
 MAX_OFFSET_SECONDS = 315360000
@@ -135,6 +137,16 @@ def _generated(source: dict[str, JSONValue], value_type: str) -> None:
         _generated_date(source)
 
 
+def _external(source: dict[str, JSONValue]) -> None:
+    optional = {"initial_value"} if "initial_value" in source else set()
+    _shape(source, {"kind", "key", "allow_empty"} | optional)
+    _identifier(source["key"])
+    _require(type(source["allow_empty"]) is bool)
+    if optional:
+        value = _string(source["initial_value"], MAX_NATIVE_INPUT_BYTES)
+        _require("\x00" not in value and len(value.encode("utf-8")) <= MAX_NATIVE_INPUT_BYTES)
+
+
 def _source(source: dict[str, JSONValue], value_type: str) -> None:
     kind = source.get("kind")
     if kind == "literal":
@@ -143,9 +155,7 @@ def _source(source: dict[str, JSONValue], value_type: str) -> None:
         if isinstance(source["value"], str):
             _string(source["value"], MAX_LITERAL_LENGTH)
     elif kind == "external":
-        _shape(source, {"kind", "key", "allow_empty"})
-        _identifier(source["key"])
-        _require(type(source["allow_empty"]) is bool)
+        _external(source)
     elif kind == "extracted":
         _shape(source, {"kind", "extractor_id"})
         _identifier(source["extractor_id"])
@@ -267,6 +277,24 @@ def _indexed(records: list[dict[str, JSONValue]]) -> dict[str, dict[str, JSONVal
     return {cast(str, record["id"]): record for record in records}
 
 
+def _native_input_permission(variable: dict[str, JSONValue], allowed: bool) -> None:
+    if not allowed and "initial_value" in _object(variable["source"]):
+        raise Har2LoadError("SCENARIO_UPGRADE_REQUIRED",
+                            "Explicit upgrade_native_inputs operation required.", 3)
+
+
+def _native_inputs(variables: list[dict[str, JSONValue]], allowed: bool) -> None:
+    # Only explicit strings participate: missing seeds never imply a captured fallback.
+    seeds: dict[str, str] = {}
+    for variable in variables:
+        _native_input_permission(variable, allowed)
+        source = _object(variable["source"])
+        if source["kind"] == "external" and "initial_value" in source:
+            key, value = cast(str, source["key"]), cast(str, source["initial_value"])
+            _require(key not in seeds or seeds[key] == value)
+            seeds[key] = value
+
+
 def _validate_references(records: dict[str, list[dict[str, JSONValue]]], capture: Capture,
                          grouping: Grouping) -> None:
     exchanges = {exchange.id for exchange in capture.exchanges}
@@ -339,9 +367,11 @@ class ParameterModel:
 
     @staticmethod
     def apply_operation(parameters: dict[str, JSONValue], op: dict[str, JSONValue],
-                        change_id: str) -> bool:
+                        change_id: str, *, allow_native_inputs: bool = False) -> bool:
         if not ParameterModel.validate_operation(op):
             return False
+        if op["op"] == "upsert_variable":
+            _native_input_permission(_object(op["variable"]), allow_native_inputs)
         _identifier(change_id, provenance=True)
         _apply(parameters, op, change_id)
         return True
@@ -349,10 +379,11 @@ class ParameterModel:
     @staticmethod
     def validate(
         parameters: JSONValue, capture: Capture, grouping: Grouping, *,
-        allow_agent_code: bool = False,
+        allow_agent_code: bool = False, allow_native_inputs: bool = False,
     ) -> None:
         block = _shape(parameters, set(_LIMITS))
         records = {key: _records(block, key) for key in _LIMITS}
+        _native_inputs(records["variables"], allow_native_inputs)
         identifiers = [record["id"] for values in records.values() for record in values]
         names = [record["name"] for record in records["variables"]]
         _require(len(set(cast(list[str], identifiers))) == len(identifiers))

@@ -14,4 +14,5 @@ int lr_save_string(const char *, const char *);
 int lr_continue_on_error(int);
 int lr_start_transaction(const char *);
 int lr_end_transaction(const char *, int);
+void lr_whoami(int *, char **, int *);
 #endif

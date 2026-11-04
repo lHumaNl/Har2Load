@@ -6,9 +6,9 @@ reset_group_name, representation selections, explicit parameter upgrade, and
 typed parameter upsert/removal, never arbitrary patches. Evidence
 uses exchange-relative RFC 6901 pointers; existence is not truth certification.
 
-ScenarioEditor.initial emits schema 1.4 with optional explicit runtime ABI contracts.
+ScenarioEditor.initial emits schema 1.5 with optional explicit native input strings.
 Earlier schemas require explicit upgrade_parameters/upgrade_extensions/
-upgrade_extension_runtime changes; upgrades never opt existing source into wrappers.
+upgrade_extension_runtime/upgrade_native_inputs changes; upgrades preserve all source.
 Schema 1.0 is accepted only as the exact legacy draft.
 
 apply is copy-on-success, increments revision once and requires a current base.
@@ -50,8 +50,11 @@ _CHOICES = {
 _CHANGE_KEYS = {"schema_version", "change_id", "base_revision", "author", "rationale",
                 "evidence", "operations"}
 _REFERENCE_KEYS = {"exchange_id", "location"}
-_PARAMETER_SCHEMAS = ("1.2", "1.3", "1.4")
-_EXTENSION_SCHEMAS = ("1.3", "1.4")
+_PARAMETER_SCHEMAS = ("1.2", "1.3", "1.4", "1.5")
+_EXTENSION_SCHEMAS = ("1.3", "1.4", "1.5")
+_RUNTIME_SCHEMAS = ("1.4", "1.5")
+_UPGRADES = {"upgrade_parameters": ("1.1", "1.2"), "upgrade_extensions": ("1.2", "1.3"),
+             "upgrade_extension_runtime": ("1.3", "1.4"), "upgrade_native_inputs": ("1.4", "1.5")}
 
 
 def _invalid() -> NoReturn:
@@ -150,7 +153,7 @@ def _operation(value: JSONValue) -> None:
         optional = {"header_index"} if "header_index" in operation else set()
         _require(operation.keys() == keys | optional)
         _choice(operation)
-    elif kind in ("upgrade_parameters", "upgrade_extensions", "upgrade_extension_runtime"):
+    elif kind in tuple(_UPGRADES):
         _require(operation.keys() == {"op"})
     elif ParameterModel.validate_operation(operation):
         return
@@ -345,19 +348,14 @@ def _rename(scenario: dict[str, JSONValue], operation: dict[str, JSONValue]) -> 
 
 def _edit(scenario: dict[str, JSONValue], operation: dict[str, JSONValue],
           source: _Source, change_id: str, grouping: Grouping) -> None:
-    if operation["op"] == "upgrade_parameters":
-        _require(scenario["schema_version"] == "1.1")
-        scenario["schema_version"] = "1.2"
-        scenario["parameters"] = ParameterModel.empty()
-        return
-    if operation["op"] == "upgrade_extensions":
-        _require(scenario["schema_version"] == "1.2")
-        scenario["schema_version"] = "1.3"
-        scenario["target_extensions"] = TargetExtensions.empty()
-        return
-    if operation["op"] == "upgrade_extension_runtime":
-        _require(scenario["schema_version"] == "1.3")
-        scenario["schema_version"] = "1.4"
+    if operation["op"] in tuple(_UPGRADES):
+        previous, upgraded = _UPGRADES[cast(str, operation["op"])]
+        _require(scenario["schema_version"] == previous)
+        scenario["schema_version"] = upgraded
+        if upgraded == "1.2":
+            scenario["parameters"] = ParameterModel.empty()
+        elif upgraded == "1.3":
+            scenario["target_extensions"] = TargetExtensions.empty()
         return
     if TargetExtensions.validate_operation(operation):
         if scenario["schema_version"] not in _EXTENSION_SCHEMAS:
@@ -366,7 +364,7 @@ def _edit(scenario: dict[str, JSONValue], operation: dict[str, JSONValue],
             )
         TargetExtensions.apply_operation(
             _object(scenario["target_extensions"]), operation, change_id,
-            allow_runtime_abi=scenario["schema_version"] == "1.4",
+            allow_runtime_abi=scenario["schema_version"] in _RUNTIME_SCHEMAS,
         )
         return
     if ParameterModel.validate_operation(operation):
@@ -382,7 +380,8 @@ def _edit(scenario: dict[str, JSONValue], operation: dict[str, JSONValue],
                     "SCENARIO_UPGRADE_REQUIRED",
                     "Explicit upgrade_extensions operation required.", 3,
                 )
-        ParameterModel.apply_operation(_object(scenario["parameters"]), operation, change_id)
+        ParameterModel.apply_operation(_object(scenario["parameters"]), operation, change_id,
+                                       allow_native_inputs=scenario["schema_version"] == "1.5")
         return
     if operation["op"] == "rename_group":
         _rename(scenario, operation)
@@ -407,7 +406,7 @@ class ScenarioEditor:
     """Copy-on-success author intent; immutable source grouping and execution states."""
 
     def initial(
-        self, capture: Capture, grouping: Grouping, *, schema_version: str = "1.4",
+        self, capture: Capture, grouping: Grouping, *, schema_version: str = "1.5",
     ) -> dict[str, JSONValue]:
         _require(schema_version in ("1.0", "1.1", *_PARAMETER_SCHEMAS))
         model: dict[str, JSONValue] = {
@@ -445,6 +444,7 @@ class ScenarioEditor:
             ParameterModel.validate(
                 value["parameters"], capture, grouping,
                 allow_agent_code=version in _EXTENSION_SCHEMAS,
+                allow_native_inputs=version == "1.5",
             )
             BindingLocations().validate(
                 _object(value["parameters"]), capture, _array(value["representation_selections"])
@@ -452,7 +452,7 @@ class ScenarioEditor:
         if version in _EXTENSION_SCHEMAS:
             TargetExtensions.validate(
                 value["target_extensions"], _object(value["parameters"]), capture, grouping,
-                allow_runtime_abi=version == "1.4",
+                allow_runtime_abi=version in _RUNTIME_SCHEMAS,
             )
         immutable = {**value, "groups": expected["groups"], "revision": 1,
                       "representation_selections": []}

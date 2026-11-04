@@ -94,10 +94,7 @@ def test_metadata_declares_runtime_and_no_native_verification() -> None:
     assert metadata["native_validation"] == metadata["execution"] == "not_run"
 
 
-@pytest.mark.parametrize("source", [{"kind": "generated", "generator": "integer",
-                                   "minimum": 1, "maximum": 2},
-                                  {"kind": "agent_code", "behavior_id": "opaque"},
-                                  {"kind": "external", "key": "LIVE_ONLY", "allow_empty": False}])
+@pytest.mark.parametrize("source", [{"kind": "agent_code", "behavior_id": "opaque"}])
 def test_unsupported_sources_block_even_unbound_variables(source: dict[str, JSONValue]) -> None:
     candidate = plan()
     assert candidate.runtime is not None

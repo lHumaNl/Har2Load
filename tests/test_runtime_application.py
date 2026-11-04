@@ -65,11 +65,11 @@ def test_two_target_scalar_runtime_generation_and_maps(tmp_path, value_type):
     assert written["data"]["report_sha256"] == checked["data"]["report_sha256"]
     report = json.loads((output / "report.json").read_bytes())
     manifest = json.loads((output / "manifest.json").read_bytes())
-    assert report["report_schema_version"] == "1.4"
+    assert report["report_schema_version"] == "1.5"
     assert report["generation"]["failure_wire_policy"] == "error_marker_json_string_v1"
     assert report["generation"]["runtime_validation"] == "not_run"
     assert report["generation"]["native_status_policy"] == "markers_only_native_status_v1"
-    assert report["generation"]["profile_version"] == "2"
+    assert report["generation"]["profile_version"] == "3"
     assert report["variables"][0]["lifecycle"]["runtime_implementation"] == "target_specific"
     for target in ("jmeter", "loadrunner"):
         for kind, entity in (("variable", "v"), ("initialize", "v"), ("reset", "v"),
@@ -80,7 +80,7 @@ def test_two_target_scalar_runtime_generation_and_maps(tmp_path, value_type):
             assert rows[0]["status"] == "generated" and rows[0]["locator"]
             assert rows[0]["artifact_sha256"] == manifest["files"][rows[0]["artifact"]]
         assert report["targets"][target]["profile"] == "scalar_runtime_v1"
-        assert report["targets"][target]["profile_version"] == "2"
+        assert report["targets"][target]["profile_version"] == "3"
     assert report["targets"]["loadrunner"]["project_status"] == "incomplete"
     assert digest_tree(workspace) == before
 
@@ -173,7 +173,7 @@ def test_generated_runtime_report_keeps_removed_mapping_history(tmp_path):
 @pytest.mark.parametrize("source", [
     {"kind": "external", "key": "PRIVATE_INPUT", "allow_empty": False},
     {"kind": "generated", "generator": "uuid"}])
-def test_unsupported_runtime_producers_block_without_reading_or_fabricating(tmp_path, source):
+def test_native_sources_render_without_reading_or_fabricating_live_values(tmp_path, source):
     app, workspace = setup(tmp_path)
     model = app.store.load(workspace).scenario
     variable = {k: v for k, v in model["parameters"]["variables"][0].items() if k != "change_id"}
@@ -186,12 +186,13 @@ def test_unsupported_runtime_producers_block_without_reading_or_fabricating(tmp_
         "evidence": [{"exchange_id": entity, "location": "/response"}],
         "operations": [{"op": "upsert_variable", "variable": variable}]}))
     app.changes_apply(workspace, changes)
-    output = tmp_path / "blocked"
+    output = tmp_path / "prepared"
     result = app.generate(workspace, output=output)
-    assert result["status"] == "error"
-    assert all(t["status"] == "blocked" for t in result["data"]["targets"].values())
+    assert result["status"] == "ok"
+    assert all(t["status"] == "generated" for t in result["data"]["targets"].values())
     assert "PRIVATE_INPUT" not in json.dumps(result)
-    assert {p.name for p in output.iterdir()} == {"manifest.json", "report.json", "report.md"}
+    assert {p.name for p in output.iterdir()} == {
+        "manifest.json", "report.json", "report.md", "jmeter", "loadrunner"}
 
 
 @pytest.mark.parametrize("fault", ["duplicate", "empty_locator", "unknown_entity"])

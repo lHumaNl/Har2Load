@@ -1,10 +1,12 @@
 """Synthetic stub contract controls, not claims about a real LoadRunner SDK."""
 
+from pathlib import Path
 from subprocess import CalledProcessError
 
 import pytest
 
 from validation.c_runtime.harness import HERE, compile_source
+from validation.c_runtime.test_lifecycle import execute, plan, response_setup
 from validation.support import run_isolated
 
 
@@ -121,3 +123,38 @@ def test_capture_publication_requires_registration_at_corresponding_http(tmp_pat
     }
     contract(tmp_path, 'int main(void) { stub_reset(); ' + checks[scenario] +
              ' puts("CAPTURE_CONTRACT_OK"); return 0; }')
+
+
+@pytest.mark.parametrize("null_output,status", [
+    (False, "LR_FAIL"), (True, "LR_FAIL"), (True, "LR_PASS"),
+])
+def test_capture_eval_cleanup_includes_null_and_allocated_failures(
+    tmp_path: Path, null_output: bool, status: str,
+) -> None:
+    execute(tmp_path, plan(), f"""
+int main(void) {{
+    stub_reset(); vuser_init(); {response_setup('{"token":"fresh"}')} Action();
+    assert(!strcmp(requests[1].body, "\\\"fresh\\\""));
+    eval_null_output = {int(null_output)}; eval_rc = {status}; Action();
+    assert(!strcmp(requests[4].body, "\\\"ERROR_token\\\""));
+    assert(eval_calls == 2 && eval_frees == 2 && eval_null_frees == {int(null_output)});
+    assert(transactions[2] == LR_AUTO && requests[4].status == LR_PASS);
+    eval_null_output = 0; eval_rc = LR_PASS; Action();
+    assert(!strcmp(requests[7].body, "\\\"fresh\\\""));
+    assert(eval_calls == 3 && eval_frees == 3 && error_calls == 0);
+    vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
+}}
+""")
+
+
+@pytest.mark.parametrize("failure", ["register_rc = LR_FAIL;", "http_rc = LR_FAIL;"])
+def test_capture_without_evaluation_does_not_invoke_cleanup(tmp_path: Path, failure: str) -> None:
+    execute(tmp_path, plan(), f"""
+int main(void) {{
+    stub_reset(); vuser_init(); {failure} Action();
+    assert(eval_calls == 0 && eval_frees == 0 && eval_null_frees == 0);
+    assert(!strcmp(requests[1].body, "\\\"ERROR_token\\\""));
+    assert(transactions[0] == LR_AUTO && error_calls == 0);
+    vuser_end(); assert(live_allocations == 0); puts("LIFECYCLE_OK"); return 0;
+}}
+""")

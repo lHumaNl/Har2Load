@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from har2load import jmeter_extensions as extensions
 from har2load import jmeter_runtime as runtime
+from har2load import jmeter_sources as sources
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
     GENERATION_PROFILE,
@@ -23,6 +24,7 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
+from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY, initial_values
 from har2load.runtime_types import (
     EXTENSION_RUNTIME_PROFILE,
     RUNTIME_PROFILE,
@@ -86,13 +88,16 @@ def _metadata(runtime_plan: RuntimePlan | None = None) -> dict[str, JSONValue]:
     return {
         "profile": (EXTENSION_RUNTIME_PROFILE if authored
                     else RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE),
-        "profile_version": "2" if runtime_plan and not authored else "1", "artifact_kind": "jmx",
+        "profile_version": "2" if authored else "3" if runtime_plan else "1",
+        "artifact_kind": "jmx",
+        **({"input_policy": INPUT_POLICY, "generator_policy": GENERATOR_POLICY,
+            "udv_encoding": sources.UDV_ENCODING} if runtime_plan else {}),
         **({"output_commit_policy": "per_output_validated_v1"} if authored else {}),
         "native_status_policy": RUNTIME_STATUS_POLICY,
         "compatibility": "unverified", "native_validation": "not_run", "execution": "not_run",
         "intended_baseline": {"jmeter": "5.5", "java": "8"},
         "sources": cast(list[JSONValue], [SOURCE_BASE + path for path in SOURCES] + (
-            runtime.SOURCES if runtime_plan else [])),
+            runtime.SOURCES + sources.SOURCES if runtime_plan else [])),
         "limitations": cast(list[JSONValue], runtime.LIMITATIONS) if runtime_plan else [
             "Structural XML checks do not establish native compatibility or wire parity.",
             "Static literals only; no runtime bindings, extractors, code, or helper execution.",
@@ -119,6 +124,9 @@ def _captured_strings(plan: RequestPlan) -> Iterator[str]:
 
 
 def _validate(plan: RequestPlan) -> None:
+    if plan.runtime and any(XML_INVALID.search(value) for value in initial_values(plan.runtime)
+                            .values()):
+        raise _Rejected("JMETER_XML_CHARACTER_UNSUPPORTED")
     if (any(len(request.headers) > 1000 for request in plan.requests)
             or sum(len(request.headers) for request in plan.requests) > 10000):
         raise _Rejected("JMETER_HEADER_LIMIT")
@@ -251,6 +259,8 @@ def _document(plan: RequestPlan) -> tuple[ET.Element, list[dict[str, JSONValue]]
     _property(test_plan, "TestPlan.functional_mode", False)
     _property(test_plan, "TestPlan.serialize_threadgroups", False)
     _arguments(test_plan, "TestPlan.user_defined_variables")
+    if plan.runtime is not None:
+        sources.attach_inputs(test_plan, plan.runtime)
     _cookie_manager(children)
     debug_tree = _thread_group(children)
     mappings: list[dict[str, JSONValue]] = []

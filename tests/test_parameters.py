@@ -370,3 +370,16 @@ def test_batch_can_repair_temporary_duplicate_names() -> None:
         "op": "upsert_variable", "variable": variable(id="v2", name="renamed"),
     }, "c2")
     validate(parameters)
+
+
+@pytest.mark.parametrize("source", [
+    {"kind": "literal", "value": "safe", "initial_value": "seed"},
+    {"kind": "extracted", "extractor_id": "e", "initial_value": "seed"},
+    {"kind": "generated", "generator": "uuid", "initial_value": "seed"},
+    {"kind": "agent_code", "behavior_id": "behavior", "initial_value": "seed"},
+])
+def test_initial_value_is_external_only(source: JSONValue) -> None:
+    with pytest.raises(Har2LoadError):
+        ParameterModel.validate_operation({
+            "op": "upsert_variable", "variable": variable(source=source),
+        })

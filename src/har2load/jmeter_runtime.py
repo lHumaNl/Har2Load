@@ -1,8 +1,7 @@
 """Offline scalar-runtime configuration and fixed inline Groovy, never a runner.
 
-Literal/extracted sources and explicitly opted-in authored bodies are supported.
-Failed JSON bindings emit string markers; successful scalars retain their types. Native parity is
-unverified. Jackson Core 2.13.3 is already bundled in the JMeter 5.5 distribution.
+Failed JSON bindings emit markers; successful scalars retain their types. Native parity is
+unverified. Jackson Core 2.13.3 is bundled in JMeter 5.5.
 """
 
 import base64
@@ -15,6 +14,7 @@ from typing import cast
 from xml.sax.saxutils import escape
 
 from har2load import jmeter_extensions as extensions
+from har2load import jmeter_sources as sources
 from har2load.domain import JSONValue
 from har2load.extension_runtime import capability_diagnostics
 from har2load.extraction import parse_json_path
@@ -43,7 +43,9 @@ SOURCES = [
 ]
 LIMITATIONS = [
     "Runtime behavior/native loading/wire parity have not been verified.",
-    "External/generated sources and non-opted-in authored extensions are unsupported.",
+    "Native inputs are private literal-encoded UDV strings snapshotted once per thread.",
+    "Generators run only at declared initialization; no uniqueness or security-token promise.",
+    "Non-opted-in authored extensions are unsupported.",
     "Authored scalar_body_v1 source is unsafe native code, not sandboxed or behavior-verified.",
     "Response header/cookie extraction is unsupported; native header normalization is unverified.",
     "Response bodies require strict UTF-8; absent charset means UTF-8, other charsets fail.",
@@ -66,13 +68,13 @@ def templates(request: RuntimeRequest) -> tuple[RuntimeTemplate, ...]:
 
 
 def validate_runtime(plan: RuntimePlan) -> None:
-    diagnostics = capability_diagnostics(plan, "jmeter")
+    diagnostics = capability_diagnostics(plan, "jmeter") + sources.capability_diagnostics(plan)
     if diagnostics:
         raise RuntimeRejected(diagnostics[0].code)
     variables = {cast(str, v["id"]) for v in plan.variables}
     for variable in plan.variables:
         if cast(dict[str, JSONValue], variable["source"])["kind"] not in {
-            "literal", "extracted", "agent_code",
+            "literal", "extracted", "agent_code", "external", "generated",
         }:
             raise RuntimeRejected("JMETER_RUNTIME_SOURCE_UNSUPPORTED")
     for extractor in plan.extractors:
@@ -112,6 +114,7 @@ def _variables(plan: RuntimePlan) -> list[JSONValue]:
     for declaration in plan.variables:
         variable = deepcopy(declaration)
         source = cast(dict[str, JSONValue], variable["source"])
+        sources.source_configuration(source)
         value = source.get("value")
         if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
             text = _bounded(str(value), MAX_RUNTIME_VALUE_BYTES)
@@ -146,7 +149,8 @@ def configuration(plan: RuntimePlan, event: str, request: RuntimeRequest | None 
               "request": asdict(request) if request is not None else None, "event": event,
               "state_key": STATE_KEY, "value_limit": MAX_RUNTIME_VALUE_BYTES,
               "field_limit": MAX_RUNTIME_FIELD_BYTES, "match_limit": MAX_MATCHES,
-              "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL,
+               "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL,
+               "generator_attempts": sources.REJECTION_ATTEMPTS,
               "extensions": extensions.configuration(plan, setup=event == extensions.SETUP_EVENT)}
     return _encode_configuration(config, budget)
 
@@ -244,9 +248,8 @@ def _reset_paths(plan: RuntimePlan, kind: str, identifier: str,
 
 
 # Programmatic StringProperty assignments bypass pre-run function compilation.
-# The sole model input is base64 JSON in Parameters, never Groovy interpolation.
-SCRIPT = r'''
-import groovy.json.JsonSlurper
+# Runtime declarations use base64 JSON; initial input strings use literal-encoded UDV.
+SCRIPT = r'''import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
 import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.JsonParser
@@ -289,9 +292,11 @@ def checked = { value, String type ->
     utf8(scalarText(value), cfg.value_limit as int)
     value
 }
+__HAR2LOAD_INPUT_SNAPSHOT__
 def state = vars.getObject(cfg.state_key)
 if (state == null) {
-    state = [values: [:], errors: [:], started: false]
+    state = [values: [:], errors: [:], started: false,
+             initialInputs: initialSnapshot(), random: new Random()]
     vars.putObject(cfg.state_key, state)
 }
 def mark = { v ->
@@ -405,6 +410,7 @@ def extract = {
         }
     }
 }
+__HAR2LOAD_SOURCES__
 def initialize = { v ->
     if (v.source.kind == 'agent_code') return
     mark(v)
@@ -412,6 +418,8 @@ def initialize = { v ->
         def source = v.source
         if (source.kind == 'literal') {
             save(v, source.numeric ? decimal(source.value) : source.value)
+        } else if (source.kind == 'external' || source.kind == 'generated') {
+            save(v, source.kind == 'external' ? externalValue(v) : generatedValue(source))
         } else {
             def result = results[source.extractor_id]
             if (result == null || !result.ok) fail()
@@ -486,4 +494,6 @@ if (cfg.event == 'iteration_start') {
     extensionRun()
 }
 return null
-'''.lstrip().replace('__HAR2LOAD_EXTENSIONS__', extensions.RUNTIME_SCRIPT)
+'''.lstrip().replace('__HAR2LOAD_EXTENSIONS__', extensions.RUNTIME_SCRIPT).replace(
+    '__HAR2LOAD_INPUT_SNAPSHOT__', sources.SNAPSHOT_SCRIPT).replace(
+    '__HAR2LOAD_SOURCES__', sources.RUNTIME_SCRIPT)

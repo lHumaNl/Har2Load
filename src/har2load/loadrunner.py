@@ -5,6 +5,7 @@ from hashlib import sha256
 
 from har2load import loadrunner_extensions as extensions
 from har2load import loadrunner_runtime as runtime
+from har2load import loadrunner_sources as sources
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
     GENERATION_PROFILE,
@@ -14,6 +15,7 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
+from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY
 from har2load.runtime_types import (
     EXTENSION_RUNTIME_PROFILE,
     RUNTIME_PROFILE,
@@ -117,14 +119,15 @@ def _metadata(plan: RequestPlan | None = None) -> dict[str, JSONValue]:
         "sources": [_DOC_ROOT + path for path in _DOC_PATHS],
     }
     if plan is not None and plan.runtime is not None:
-        result.update(profile=RUNTIME_PROFILE, profile_version="2",
+        result.update(profile=RUNTIME_PROFILE, profile_version="3",
                       limitations=list(runtime.LIMITATIONS),
                       sources=[_DOC_ROOT + path for path in (*_DOC_PATHS, *runtime.DOC_PATHS)],
                       json_failure_wire_policy="quoted_error_marker",
                       runtime_state_isolation="per_vuser_native_verification_pending")
         result["native_status_policy"] = RUNTIME_STATUS_POLICY
+        result.update(input_policy=INPUT_POLICY, generator_policy=GENERATOR_POLICY)
         if extensions.enabled(plan.runtime):
-            result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="1",
+            result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="2",
                           output_commit_policy="per_output_validated_v1")
     return result
 
@@ -411,6 +414,9 @@ def _files(plan: RequestPlan) -> dict[str, bytes]:
     output.add("loadrunner/vuser_end.c", end.splitlines())
     output.add("loadrunner/README.txt", readme.splitlines())
     output.add(_ACTION, _action_lines(plan))
+    if plan.runtime is not None:
+        for path, lines in sources.artifacts(plan.runtime):
+            output.add(path, lines)
     return output.files
 
 
@@ -428,6 +434,7 @@ def _scaffold_text(live: bool) -> tuple[str, str, str, str]:
         readme = readme.replace("Option and service-function return values are unchecked:",
                                 "Initialization/cookie/cache returns remain unchecked;")
         paths += runtime.DOC_PATHS
+        readme += sources.INSTRUCTIONS
     return globals_text, init, end, readme + "\n".join(_DOC_ROOT + path for path in paths) + "\n"
 
 

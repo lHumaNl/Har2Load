@@ -58,7 +58,7 @@ def test_live_correlation_precedes_binding_without_recorded_fallback() -> None:
     assert "ERROR_token" in source and "lr_continue_on_error(LR_ON_ERROR_CONTINUE)" in source
 
 
-@pytest.mark.parametrize("kind", ["external", "generated", "agent_code"])
+@pytest.mark.parametrize("kind", ["agent_code"])
 def test_unsupported_sources_block(kind: str) -> None:
     build = LoadRunnerGenerator().generate(plan(variable(source={"kind": kind})))
     assert build.status == "blocked" and not build.files
@@ -144,7 +144,8 @@ def test_capture_reset_failure_checks_ownership_and_terminator() -> None:
     assert '"LB=", "RB="' in body and '"Ordinal=' not in body and '"Scope=Body"' in body
     assert "h2l_capture(h2l_ok && h2l_rc == LR_PASS)" in body
     assert "copy[n] = 0" in source and "n <= H2L_FIELD_LIMIT" in source
-    assert "if (native) { owned = native; lr_eval_string_ext_free(&owned); }" in source
+    assert "owned = native; lr_eval_string_ext_free(&owned);" in source
+    assert "if (native) { owned = native;" not in source
     assert "free(h2l_response)" in body
     assert "lr_eval_string_ext(data" not in source
 

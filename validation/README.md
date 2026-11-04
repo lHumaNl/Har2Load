@@ -148,3 +148,54 @@ under the investigation root, with source/evidence digests. Package installation
 evidence is in the separate private `har2load-wrappers-install-vap_4wje` directory.
 No captured HTTP, engine execution, actual VuGen/SDK verification or arbitrary
 customer-code execution was performed. Per-workspace readiness remains `not_run`.
+
+## Native inputs and generated sources — 2026-11-04, 0.9.0a1
+
+`jmeter/test_sources.py` and `jmeter/SourceHarness.groovy` exercise native Test Plan
+UDV precompilation and literal decoding. An executable-function negative control
+proves the encoded fixture does not merely bypass the parser. Tests cover missing,
+empty, typed and marker-shaped inputs; immutable snapshots; source/output-name
+collisions; signed-64 limits, dates, UUIDs, offsets and string generation; repeat and
+unrelated-request lifecycle events; PRNG draws and wrapper/binding order.
+
+The source batch has **101 native cases**, each with two workers, plus **6 Python
+capability-gate checks** (not six more native cases). Actual controller initialization
+and advancement reproduce the `__jm__` namespace collision without sampling HTTP;
+the native variable API checks `__jmv_` semantics. This is not a complete
+`JMeterThread.initRun()` or engine-scheduling test. Generation rejects both reserved
+prefixes for external keys and exported runtime names.
+
+`c_runtime/test_sources.py` tests emitted generators and native-input snapshots with
+synthetic SDK parameter storage and controlled time/Vuser IDs. The full C suite now
+contains **181 tests**, including nullable cleanup after both input and response
+evaluation, allocated failure, recovery and no-evaluation/no-cleanup paths. The
+stub cleanup contract follows the documented `lr_eval_string_ext_free` requirement
+even for a NULL result. This does not establish that an actual SDK leak existed.
+The bounded PRNG rejection-exhaustion branch is not dynamically forced in C.
+
+Native `.prm/.dat` parsing is **not tested with VuGen**. ConfigParser/CSV inspection
+only verifies structural fixture consistency; arbitrary encoding, relative-path
+acceptance, missing/corrupt native files and concurrent Vuser isolation remain
+unverified. No `.usr` project is fabricated, and no custom input JSON loader is used.
+
+The five source generators run only at declared initialization events; UDV/native
+parameters store initial configuration, not random streams. Source failures retain
+`markers_only_native_status_v1`. No crypto, uniqueness or cross-target stream parity
+is promised. These developer tests preserve all per-workspace `not_run` statuses.
+
+Final lead run: **184 pytest tests passed in 392.13s**—181 C tests and three JMeter
+batches (101 source, 55 authored, 53 baseline cases). All **209 JMX digests** matched
+their retained execution reports. Without opt-in, **184 skipped**. Default tests:
+**1342 passed** with both pytest entry points; Ruff and mypy (36 modules) passed.
+The private record is `har2load-sources-final-AFX6I5/lead-verification.json` under
+the approved temporary root; SHA-256:
+`4162975382c199c2a0e4d5dabec881afb1b05d572f0d5bd1c0923934b9ef1014`.
+
+Independent shared, JMeter and C gates approved after closing native-name collision,
+negative lifecycle coverage and nullable SDK cleanup findings. Reviews were read-only;
+the lead performed the final executions and byte/digest checks. A rebuilt 0.9 wheel
+read/upgraded a real installed-0.8 workspace, preserved historical objects/raw HAR,
+and emitted both targets with verified manifest hashes. All 36 source modules match
+the wheel and installed bytes. Final wheel SHA-256:
+`b977de7116d6c70a21f0becb8e6c67e082c44f40f4b5d63f5136dead7f61926c`.
+Git publication is separate from these synthetic validation results.

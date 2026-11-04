@@ -5,6 +5,7 @@ partial native file, but the other target and diagnostic reports can be publishe
 """
 
 import hashlib
+import re
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -20,6 +21,7 @@ from har2load.loadrunner import LoadRunnerGenerator
 from har2load.presentation import record
 from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
 from har2load.runtime_planning import GenerationPlanner
+from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY, source_diagnostics
 from har2load.runtime_types import (
     EXTENSION_RUNTIME_PROFILE,
     RUNTIME_PROFILE,
@@ -30,7 +32,9 @@ from har2load.workspace import WorkspaceSnapshot
 
 TARGETS = ("jmeter", "loadrunner")
 _FILES = {"jmeter/scenario.jmx", "loadrunner/Action.c", "loadrunner/globals.h",
-          "loadrunner/vuser_init.c", "loadrunner/vuser_end.c", "loadrunner/README.txt"}
+          "loadrunner/vuser_init.c", "loadrunner/vuser_end.c", "loadrunner/README.txt",
+          "loadrunner/native_inputs.prm"}
+_INPUT_TABLE = re.compile(r"loadrunner/data/input_[0-9a-f]{64}\.dat")
 _PARAMETER_KINDS = {"variable", "initialize", "reset", "extractor", "binding"}
 _RUNTIME_KINDS = _PARAMETER_KINDS | {
     "code_block", "reset_outputs", "helper_definition", "helper_call",
@@ -101,6 +105,7 @@ def _target(
                        if d.target == name and d.severity == "error")
     if plan.runtime is not None:
         diagnostics.extend(capability_diagnostics(plan.runtime, name))
+        diagnostics.extend(source_diagnostics(plan.runtime, name))
     generator = JMeterGenerator() if name == "jmeter" else LoadRunnerGenerator()
     return generator.generate(replace(plan, diagnostics=tuple(diagnostics)))
 
@@ -165,6 +170,12 @@ def _parameter_map(
 
 def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValue]) -> None:
     target_statuses = {target: statuses.get(target, "not_requested") for target in TARGETS}
+    input_definitions: dict[str, list[JSONValue]] = {}
+    for variable in _objects(document["variables"]):
+        declaration = cast(dict[str, JSONValue], variable["declaration"])
+        source = cast(dict[str, JSONValue], declaration["source"])
+        if source["kind"] == "external" and "initial_value" in source:
+            input_definitions.setdefault(cast(str, source["key"]), []).append(variable["id"])
     for variable in _objects(document["variables"]):
         for key in ("lifecycle", "failure_policy"):
             section = cast(dict[str, JSONValue], variable[key])
@@ -176,6 +187,40 @@ def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValu
                                                            variable["declaration"])["name"]),
                          "marker_is_typed_success": False, "stale_value_reuse": "forbidden",
                          "native_status_policy": RUNTIME_STATUS_POLICY})
+        declaration = cast(dict[str, JSONValue], variable["declaration"])
+        source = cast(dict[str, JSONValue], declaration["source"])
+        formation = cast(dict[str, JSONValue], variable["formation"])
+        if source["kind"] == "external":
+            definitions = input_definitions.get(cast(str, source["key"]), [])
+            formation["native_input"] = {
+                "key": source["key"], "policy": INPUT_POLICY,
+                "initial_value_present": bool(definitions),
+                "initial_definition_variable_ids": list(definitions),
+                "missing_input_policy": "marker_and_continue", "resolution": "not_run",
+                "custom_runtime_json_file": False,
+            }
+        elif source["kind"] == "generated":
+            formation["native_generator"] = {
+                "policy": GENERATOR_POLICY, "evaluation": "declared_initialization_event",
+                "per_binding_regeneration": False, "runtime_value": "not_generated",
+                "security_token_guarantee": False, "cross_target_identical_stream": False,
+            }
+    for item in _objects(document["external_inputs"]):
+        source = cast(dict[str, JSONValue], item["declaration"])
+        supplied = bool(input_definitions.get(cast(str, source["key"])))
+        item["instructions"] = (
+            ("Explicit initial configuration is supplied for this shared input key. "
+             "For generated targets, edit literal-encoded JMeter Test Plan UDV or integrate "
+             "native_inputs.prm/data files into a real VuGen project and edit its parameters. "
+             if supplied else
+             "No explicit initial configuration is supplied for this shared input key. "
+             "For JMeter, add a UDV entry using jmeter_udv_literal_v1 encoding. "
+             "For VuGen, declare source.initial_value and regenerate before integrating "
+             "native parameter files; undeclared native keys are not probed. ")
+            + "Consult each target's generation status and encoding limitations; runtime "
+            "resolution remains unverified. Missing/invalid inputs produce ERROR_<name> "
+            "and continue without overriding native status. No custom runtime JSON file."
+        )
     extensions = cast(dict[str, JSONValue], document["target_extensions"])
     extensions.update({"runtime_implementation": "target_specific",
                        "target_implementations": target_statuses.copy(),
@@ -188,6 +233,8 @@ def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValu
         "Successful validated outputs survive later failures; other outputs remain markers.",
         "Correlation errors never override native sample/transaction status.",
         "Ordinary preparation never executes source or resolves runtime dependencies.",
+        "Explicit native initial strings are preserved with redaction off, including secrets.",
+        "Generated values are runtime-only; no global uniqueness or cryptographic promise.",
         "Native crashes, undefined behavior, infinite loops and side effects are not contained.",
     ]
 
@@ -217,7 +264,9 @@ class GenerationBuilder:
                    else GENERATION_PROFILE)
         builds = tuple(_target(target, plan, snapshot.scenario) for target in selected)
         files = {path: data for build in builds for path, data in build.files.items()}
-        if any(path not in _FILES for path in files):
+        if any(not path.startswith(build.target + "/")
+               or (path not in _FILES and _INPUT_TABLE.fullmatch(path) is None)
+               for build in builds for path in build.files):
             raise Har2LoadError("GENERATION_PATH_INVALID", "Invalid generated artifact path.", 3)
         statuses: dict[str, JSONValue] = {build.target: build.status for build in builds}
         target_metadata: dict[str, JSONValue] = {
@@ -226,7 +275,7 @@ class GenerationBuilder:
         }
         diagnostics = tuple(d for build in builds for d in build.diagnostics)
         document = deepcopy(base_report.document)
-        document["report_schema_version"] = "1.4" if runtime else "1.2"
+        document["report_schema_version"] = "1.5" if runtime else "1.2"
         document["targets"] = {target: target_metadata.get(target, {"status": "not_requested"})
                                for target in TARGETS}
         jmeter_generated = statuses.get("jmeter") == "generated"
@@ -256,7 +305,7 @@ class GenerationBuilder:
         if runtime:
             _runtime_report(document, statuses)
         document["generation"] = {
-            "profile": profile, "profile_version": "1" if authored or not runtime else "2",
+            "profile": profile, "profile_version": "2" if authored else "3" if runtime else "1",
             "producer_version": __version__,
             "requested_targets": list(selected), "decisions": list(plan.decisions),
             "diagnostics": [record(d) for d in diagnostics],
@@ -274,6 +323,9 @@ class GenerationBuilder:
         if runtime:
             generation = cast(dict[str, JSONValue], document["generation"])
             generation.update({"failure_wire_policy": "error_marker_json_string_v1",
+                                "native_input_policy": INPUT_POLICY,
+                                "generator_policy": GENERATOR_POLICY,
+                                "missing_input_policy": "marker_and_continue",
                                 "native_status_policy": RUNTIME_STATUS_POLICY,
                                 "output_commit_policy": "per_output_validated_v1",
                                "runtime_validation": "not_run",

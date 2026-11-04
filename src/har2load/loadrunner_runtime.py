@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from typing import cast
 from urllib.parse import quote, quote_plus
 
+from har2load import loadrunner_sources as sources
 from har2load.domain import Diagnostic, JSONValue
 from har2load.extension_runtime import capability_diagnostics
 from har2load.extension_runtime import declarations as extension_records
@@ -25,10 +26,11 @@ DOC_PATHS = (
     "c_vuser/lrFr_lr_eval_string_ext.htm", "c_vuser/lrFr_lr_eval_string_ext_free.htm",
     "c_vuser/lrFr_lr_save_string.htm",
     "c_vuser/lrFr_lr_end_transaction.htm", "c_vuser/lrFr_lr_output_message.htm",
-    "c_vuser/lrFr_lr_error_message.htm",
+    "c_vuser/lrFr_lr_error_message.htm", "c_vuser/lrFr_lr_whoami.htm",
 )
 LIMITATIONS = (
-    "Literal/extracted scalars and opted-in scalar_body_v1 bodies; external/generated blocked.",
+    "Literal/extracted scalars, bounded native inputs/generators and scalar_body_v1 bodies.",
+    "Native parameter files support a conservative ASCII subset; SDK presence is unverified.",
     "Authored bodies are not sandboxed; no crash, undefined-behavior or loop containment.",
     "Dependencies are unsupported; helper contracts and native effects remain author-owned.",
     "Body boundary_v1 and strict scalar JSON subset only; header/cookie extractors blocked.",
@@ -156,7 +158,8 @@ static char *h2l_capture(int ok)
         copy = (char*)malloc((size_t)n + 1);
         if (copy) { memcpy(copy, native, n); copy[n] = 0; }
     }
-    if (native) { owned = native; lr_eval_string_ext_free(&owned); }
+    /* The documented eval contract requires cleanup even for a NULL result. */
+    owned = native; lr_eval_string_ext_free(&owned);
     return copy;
 }
 static void h2l_boundary(h2l_value *v, const char *body, const char *left,
@@ -212,7 +215,7 @@ def scalar(value: JSONValue) -> str:
 
 def _variable_errors(variable: dict[str, JSONValue], authored: bool) -> Iterator[Diagnostic]:
     source = obj(variable["source"])
-    if source["kind"] not in ("literal", "extracted") and not (
+    if source["kind"] not in ("literal", "extracted", "external", "generated") and not (
             authored and source["kind"] == "agent_code"):
         yield _error("SOURCE_UNSUPPORTED", identifier(variable))
     if source["kind"] == "literal":
@@ -252,6 +255,7 @@ def diagnostics(runtime: RuntimePlan) -> tuple[Diagnostic, ...]:
     authored = bool(extension_records(runtime, "loadrunner", "blocks"))
     errors = [e for v in runtime.variables for e in _variable_errors(v, authored)]
     errors.extend(capability_diagnostics(runtime, "loadrunner"))
+    errors.extend(sources.diagnostics(runtime))
     for ext in runtime.extractors:
         errors.extend(_extractor_errors(ext))
     for request in runtime.requests:
@@ -279,6 +283,7 @@ def _comment(kind: str, entity: str) -> str:
 
 
 def declarations(runtime: RuntimePlan) -> Iterator[str]:
+    yield from sources.declarations(runtime)
     for variable in runtime.variables:
         entity = identifier(variable)
         name = symbol("VALUE", entity)
@@ -297,6 +302,10 @@ def _initializer(variable: dict[str, JSONValue], name: str) -> Iterator[str]:
     yield _comment("initialize", identifier(variable))
     yield f"static void {symbol('INIT_FN', identifier(variable))}(const h2l_value *value) {{"
     source = obj(variable["source"])
+    if source["kind"] in ("external", "generated"):
+        yield from sources.initializer(variable, name, _TYPES[cast(str, variable["value_type"])])
+        yield "}"
+        return
     if source["kind"] == "literal":
         value = source["value"]
         kind = _TYPES[cast(str, variable["value_type"])]
@@ -326,9 +335,11 @@ def session_lines(runtime: RuntimePlan) -> Iterator[str]:
     yield "void h2l_session_start(void) {"
     yield "    h2l_transaction_failed = 0;"
     yield from reset_lines(runtime, ("session", "iteration", "request"))
+    yield from sources.session_lines(runtime, start=True)
     yield from event_lines(runtime, "session_start")
     yield "}\nvoid h2l_session_end(void) {"
     yield from reset_lines(runtime, ("session", "iteration", "request"))
+    yield from sources.session_lines(runtime, start=False)
     yield "}"
 
 

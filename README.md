@@ -38,16 +38,18 @@ application does not contain an LLM client or contact captured endpoints.
   lifecycle actions and exact request templates, with explicit failure markers and source maps.
 - Explicit `scalar_body_v1` Groovy/C wrappers, JMeter setup helper registry, typed helper
   calls and per-output publication; correlation markers never override native result status.
+- Native initial strings in JMeter Test Plan UDV and bounded VuGen `.prm/.dat`
+  integration assets; five lifecycle-driven scalar generators, without a JSON input loader.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
-external/generated source execution, response-header/cookie runtime
+response-header/cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.8.0a1` writes workspace schema `2.0` with scenario
-schema `1.4`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
+interchange format. Version `0.9.0a1` writes workspace schema `2.0` with scenario
+schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
 rejected; no workspace is silently migrated.
@@ -58,6 +60,10 @@ change to scenario 1.3. Explicit wrapper ABI opt-in additionally requires
 upgrading never opts existing opaque source into wrappers automatically.
 Existing `0.5.0a1`/`0.6.0a1`/`0.7.0a1` workspaces remain readable/editable for their
 previous operations without an upgrade; wrapper opt-in requires the explicit 1.4 transition.
+Existing `0.8.0a1` workspaces remain readable/editable. Adding `source.initial_value`
+requires audited `upgrade_native_inputs` from scenario 1.4 to 1.5. The upgrade
+preserves existing declarations and never invents initial values; historical revisions
+retain their original schema.
 
 ## Install
 
@@ -201,6 +207,7 @@ Supported operations (unknown keys/operations are rejected):
 | `upgrade_parameters` | none | Explicitly upgrade scenario 1.1 to 1.2 within a revision |
 | `upgrade_extensions` | none | Explicitly upgrade scenario 1.2 to 1.3 within a revision |
 | `upgrade_extension_runtime` | none | Explicitly upgrade scenario 1.3 to 1.4 without opting existing source into wrappers |
+| `upgrade_native_inputs` | none | Explicitly upgrade scenario 1.4 to 1.5 without inventing initial strings |
 | `upsert_variable` / `upsert_extractor` / `upsert_binding` | `variable` / `extractor` / `binding` | Add or replace a complete typed declaration |
 | `remove_variable` / `remove_extractor` / `remove_binding` | `id` | Remove a declaration without cascading deletion |
 | `upsert_code_block` / `upsert_helper` | `block` / `helper` | Store a complete opaque target declaration and derive its source digest |
@@ -399,7 +406,8 @@ are not fallback live values. Unbound fields remain capture-derived data.
 
 ### Supported declarations and explicit limits
 
-- Sources: `literal` and `extracted`; scalar string, integer, number, boolean and null.
+- Sources: `literal`, `extracted`, native `external` inputs and the five `generated`
+  scalar kinds; scalar string, integer, number, boolean and null.
 - Extractors: `response_body` with `json_path_subset_v1` or `boundary_v1`, including
   explicit cardinality/occurrence and `allow_empty`. Unreferenced extractors are
   still emitted and checked rather than silently discarded.
@@ -416,9 +424,8 @@ are not fallback live values. Unbound fields remain capture-derived data.
 - Runtime binding to Content-Type, Content-Encoding, authentication, cookies or
   managed/Connection-nominated headers is blocked. Header names remain static.
   Unsafe live header values become binding error markers, not injected header lines.
-- External/generated sources remain unsupported and block generation even when
-  unbound. Agent-code producers require an explicitly opted-in supported target
-  wrapper. No environment, external file, random generator or authored code is
+- Agent-code producers require an explicitly opted-in supported target wrapper.
+  No environment, external file, random generator or authored code is
   evaluated during preparation; declared dependencies are not read or downloaded.
 - Response-header/cookie runtime extraction is blocked rather than treating native
   normalized headers or a persistent cookie jar as equivalent to HAR response arrays.
@@ -428,6 +435,55 @@ initial recorded authentication/cookies and unresolved request representations a
 not made safe merely by adding runtime variables. Target-specific errors can still
 leave another target's files and diagnostic reports; exit status remains 3 if any
 requested target is blocked.
+
+### Native initial inputs and generated sources
+
+An external source optionally carries `initial_value`, a **string**, even for a
+numeric/boolean/null variable. It is native configuration text parsed against the
+declared scalar type at runtime, not an expression or a captured-value fallback.
+Model strings must be valid UTF-8, NUL-free and at most 65,536 bytes. Absence differs
+from an explicit empty string; `allow_empty` permits empty string values, not invalid
+numeric input. Shared keys deduplicate equal initials; conflicting explicit strings
+reject the final changeset. An absent declaration can share another variable's initial.
+Redaction is off: explicit secrets are preserved in private native artifacts.
+
+**JMeter:** initials live in the native Test Plan User Defined Variables panel, not
+a custom runtime file. Missing keys are omitted; add a UDV entry to supply one.
+Generated and manually edited values must follow `jmeter_udv_literal_v1`: double
+every backslash, then prefix every `${` opener with a backslash. The runtime reverses
+this encoding once as text. Do not enter raw JMeter functions. XML 1.0 unsupported
+characters block generation rather than silently changing data. Native inputs are
+snapshotted once per thread **before** runtime variable writes, preserving key/name
+collisions and legitimate `ERROR_*` strings.
+JMeter reserves variable names/input keys beginning `__jm__` or `__jmv_`; generation
+rejects them instead of silently consuming or overwriting native controller state.
+
+**LoadRunner:** `native_inputs.prm` and `data/input_<sha256>.dat` are native parameter
+integration assets, **not a complete VuGen project**. Integrate them with a real
+project's parameter file and retain relative data paths; no `.usr` is fabricated.
+Only explicitly configured keys are read and snapshotted once per Vuser. Missing
+initials produce markers without probing unknown SDK parameters. To add a previously
+undefined key, provide `source.initial_value` and regenerate. Native project loading,
+missing/corrupt files, encoding and parameter-existence behavior are not certified by
+synthetic C stubs. Unsupported table representations block that target, not the model
+or an otherwise supported JMeter output. Consult generated `loadrunner/README.txt`.
+The current table subset is nonempty printable ASCII, without quotes, commas or
+leading/trailing spaces; empty, Unicode and multiline initials are blocked. The
+native capture key `H2L_RESPONSE` is reserved. Runtime edits of configured parameters
+still undergo strict UTF-8/type/size checks. This is not proof of arbitrary native
+table encoding or quiet missing-parameter detection.
+
+`native_initial_snapshot_v1` reads those snapshots at declared initialization events.
+Missing/invalid values emit `ERROR_<name>` and value-free diagnostics, continue, and
+never override native status; there is no external-input preflight stop. Native loader
+failures are not claimed to be contained. Dataset preflight/EOF is separate and unimplemented.
+
+`per_user_generated_scalars_v1` uses per-user state and computes only at declared
+lifecycle events, never per binding: inclusive signed-64 integers (including the full
+range), printable-ASCII strings, lowercase UUIDv4, UTC second-precision timestamps
+with the declared offset, and inclusive ISO date ranges in years 0001–9999.
+Bindings reuse saved values. There is no cryptographic, global-uniqueness or
+identical-cross-target-stream guarantee. Preparation computes no live values.
 
 ### Lifecycle and approved failure-wire behavior
 
@@ -489,14 +545,14 @@ live values are small—for example, three maximum-size JSON slots exceed 1 MiB.
 Native representation details such as numeric spelling/negative zero may differ;
 successful JSON numeric values are not intentionally converted through binary floats.
 
-The runtime report uses schema **1.4**; static generation remains 1.2 and ordinary
+The runtime report uses schema **1.5**; static generation remains 1.2 and ordinary
 model-only `report` remains 1.1. Runtime maps link each variable, initializer, reset,
 extractor and binding to actual native locations and file hashes; missing, duplicate
 or unexpected declaration mappings refuse publication. Removed mappings remain in
 revision history. Reports disclose failure-wire policy and per-target implementation
 status separately from captured extraction checks. The scalar runtime profile now
-reports `profile_version: "2"` for the status-policy change. Authored wrappers use
-`authored_scalar_runtime_v1`, version 1, with `per_output_validated_v1` publication.
+reports `profile_version: "3"` for native inputs/generators. Authored wrappers use
+`authored_scalar_runtime_v1`, version 2, with `per_output_validated_v1` publication.
 
 **Runtime correctness/native compatibility is not certified by these artifacts.**
 The default Python `tests/` suite inspects structure, data, ordering and contracts;
@@ -681,20 +737,21 @@ Supported source objects:
 
 - `{"kind":"literal","value":7}` — must match the declared scalar type.
 - `{"kind":"external","key":"API_TOKEN","allow_empty":false}` — declares a
-  runtime prerequisite; preparation never reads the environment or a secrets file.
+  native input, initially absent. Scenario 1.5 permits optional `"initial_value":"text"`;
+  preparation never reads the environment or a secrets file.
 - `{"kind":"extracted","extractor_id":"ext_order"}` — a recorded producer.
 - `{"kind":"agent_code","behavior_id":"make_order_id"}` — a scalar output of
   explicit target code blocks (scenario 1.3); no local evaluation or inferred value.
 - `{"kind":"generated","generator":"integer","minimum":1,"maximum":100}` —
-  inclusive bounds; declaration only.
+  inclusive bounds; native generation requires signed-64 endpoints.
 - `{"kind":"generated","generator":"string","length":12,"alphabet":"abc123"}` —
   distinct printable ASCII alphabet, length 1–4096.
 - `{"kind":"generated","generator":"uuid"}`.
 - `{"kind":"generated","generator":"utc_datetime","offset_seconds":0,"format":"iso8601"}`.
 - `{"kind":"generated","generator":"utc_date_range","minimum":"2026-01-01","maximum":"2026-12-31","format":"iso8601"}`.
 
-Generated sources are **not evaluated during preparation**. Their future native
-implementations, parity and runtime formatting remain unverified. `purpose` is a
+Generated sources are **not evaluated during preparation**. Native implementations
+exist in the bounded profiles; engine/wire parity remains unverified. `purpose` is a
 required nonblank explanation (up to 1024 characters), and `sensitive` is a required
 boolean annotation—not automatic redaction.
 
@@ -1145,7 +1202,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.8.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.9.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "lrun.h"
 #include "web_api.h"
 
@@ -32,6 +33,7 @@ static size_t response_size;
 static const unsigned char *scheduled_response = (const unsigned char *)"";
 static size_t scheduled_response_size;
 static int eval_rc, eval_calls, eval_frees, error_calls, output_calls, save_calls;
+static int eval_null_output, eval_null_frees;
 static int save_fail_at = -1, register_rc, max_length_rc, header_rc, http_rc;
 static int fail_http_at = -1, request_count, transaction_count;
 static int cookie_cleanups, cache_cleanups, option_calls, continue_calls;
@@ -44,6 +46,42 @@ typedef struct {
 } snapshot;
 static snapshot requests[32];
 static int transactions[32];
+/* Borrowed synthetic parameter bytes; deliberately independent of capture storage. */
+#define SYNTHETIC_PARAMETER_COUNT 16
+typedef struct { const char *key; const unsigned char *data; size_t size; int rc; } native_input;
+static native_input native_inputs[SYNTHETIC_PARAMETER_COUNT];
+static int native_input_count, native_eval_calls, whoami_calls, synthetic_user_id = 1;
+static int time_calls, clock_calls;
+static time_t synthetic_seconds = 1709164800;
+static clock_t synthetic_ticks = 123;
+static time_t synthetic_time(time_t *out) {
+    ++time_calls; if (out) *out = synthetic_seconds; return synthetic_seconds;
+}
+static clock_t synthetic_clock(void) { ++clock_calls; return synthetic_ticks; }
+void lr_whoami(int *id, char **group, int *scenario) {
+    assert(id && !group && !scenario); *id = synthetic_user_id; ++whoami_calls;
+}
+static void seed_native(const char *key, const unsigned char *data, size_t size, int rc) {
+    int i;
+    for (i = 0; i < native_input_count; ++i) if (!strcmp(native_inputs[i].key, key)) break;
+    assert(i < SYNTHETIC_PARAMETER_COUNT);
+    if (i == native_input_count) ++native_input_count;
+    native_inputs[i].key = key; native_inputs[i].data = data;
+    native_inputs[i].size = size; native_inputs[i].rc = rc;
+}
+static int eval_native(const char *name, int length, char **out, unsigned long *n) {
+    int i; ++native_eval_calls;
+    assert(length >= 2 && name[0] == '{' && name[length - 1] == '}');
+    for (i = 0; i < native_input_count; ++i) {
+        native_input *input = &native_inputs[i];
+        if (strlen(input->key) != (size_t)length - 2 || memcmp(name + 1, input->key, length - 2))
+            continue;
+        *n = (unsigned long)input->size;
+        *out = malloc(input->size ? input->size : 1); assert(*out);
+        memcpy(*out, input->data, input->size); return input->rc;
+    }
+    *out = NULL; *n = 0; return LR_FAIL;
+}
 
 static void copy_checked(char *out, size_t capacity, const char *in) {
     assert(strlen(in) < capacity); strcpy(out, in);
@@ -57,6 +95,7 @@ static void stub_reset(void) {
     response = (const unsigned char *)""; response_size = 0;
     scheduled_response = (const unsigned char *)""; scheduled_response_size = 0;
     eval_rc = eval_calls = eval_frees = error_calls = output_calls = save_calls = 0;
+    eval_null_output = eval_null_frees = 0;
     save_fail_at = fail_http_at = -1;
     register_rc = max_length_rc = header_rc = http_rc = 0;
     request_count = transaction_count = cookie_cleanups = cache_cleanups = 0;
@@ -64,6 +103,8 @@ static void stub_reset(void) {
     saved_parameter[0] = next_header[0] = 0;
     memset(requests, 0, sizeof(requests)); memset(transactions, 0, sizeof(transactions));
     alloc_attempts = 0; alloc_fail_at = -1;
+    native_input_count = native_eval_calls = whoami_calls = time_calls = clock_calls = 0;
+    synthetic_user_id = 1; synthetic_seconds = 1709164800; synthetic_ticks = 123;
 }
 int lr_error_message(const char *format, ...) {
     /* Native error logging can fail open transactions; tests reject any such call. */
@@ -74,15 +115,22 @@ int lr_output_message(const char *format, ...) {
 }
 int lr_eval_string_ext(const char *name, int length, char **out,
                        unsigned long *n, int a, int b, int c) {
-    assert(!strcmp(name, "{H2L_RESPONSE}") && length == 14);
     assert(a == 0 && b == 0 && c == -1); ++eval_calls;
+    /* Explicit NULL-result seam, independent of return status; not SDK emulation. */
+    if (eval_null_output) {
+        if (strcmp(name, "{H2L_RESPONSE}")) ++native_eval_calls;
+        *out = NULL; *n = 0; return eval_rc;
+    }
+    if (strcmp(name, "{H2L_RESPONSE}")) return eval_native(name, length, out, n);
+    assert(length == 14);
     *n = (unsigned long)response_size;
     /* No NUL terminator: runtime must respect the reported native length. */
     *out = malloc(response_size ? response_size : 1); assert(*out);
     memcpy(*out, response, response_size); return eval_rc;
 }
 void lr_eval_string_ext_free(const char **p) {
-    assert(*p); free((void *)*p); *p = NULL; ++eval_frees;
+    assert(p); if (!*p) ++eval_null_frees;
+    free((void *)*p); *p = NULL; ++eval_frees;
 }
 int lr_save_string(const char *value, const char *name) {
     assert(!strcmp(name, "H2L_RESPONSE"));
