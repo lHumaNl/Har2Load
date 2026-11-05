@@ -37,6 +37,19 @@ static int eval_null_output, eval_null_frees;
 static int save_fail_at = -1, register_rc, max_length_rc, header_rc, http_rc;
 static int fail_http_at = -1, request_count, transaction_count;
 static int cookie_cleanups, cache_cleanups, option_calls, continue_calls;
+/* Observe API calls only: never emulate cookie scope, expiry, or server updates. */
+#define SYNTHETIC_COOKIE_CALLS 32
+#define SYNTHETIC_COOKIE_ARGUMENT 70656
+#define SYNTHETIC_COOKIE_EVENTS 4096
+static int cookie_adds, cookie_cleanup_rc, fail_cookie_at = -1;
+static char cookie_arguments[SYNTHETIC_COOKIE_CALLS][SYNTHETIC_COOKIE_ARGUMENT];
+static char cookie_events[SYNTHETIC_COOKIE_EVENTS];
+static size_t cookie_event_count;
+static void cookie_event(char event) {
+    /* Long unrelated stress tests need not retain an unbounded trace. */
+    if (cookie_event_count + 1 >= sizeof(cookie_events)) return;
+    cookie_events[cookie_event_count++] = event; cookie_events[cookie_event_count] = 0;
+}
 static int registration_count, capture_registered;
 static char saved_parameter[1048578]; /* bounded synthetic storage, including limit+1 */
 static char next_header[4096];
@@ -99,6 +112,9 @@ static void stub_reset(void) {
     save_fail_at = fail_http_at = -1;
     register_rc = max_length_rc = header_rc = http_rc = 0;
     request_count = transaction_count = cookie_cleanups = cache_cleanups = 0;
+    cookie_adds = cookie_cleanup_rc = 0; fail_cookie_at = -1;
+    cookie_event_count = 0; cookie_events[0] = 0;
+    memset(cookie_arguments, 0, sizeof(cookie_arguments));
     option_calls = continue_calls = registration_count = capture_registered = 0;
     saved_parameter[0] = next_header[0] = 0;
     memset(requests, 0, sizeof(requests)); memset(transactions, 0, sizeof(transactions));
@@ -146,8 +162,16 @@ int lr_end_transaction(const char *name, int status) {
     transactions[transaction_count++] = status; return LR_PASS;
 }
 int web_set_option(const char *name, ...) { (void)name; ++option_calls; return LR_PASS; }
-int web_cleanup_cookies(void) { ++cookie_cleanups; return LR_PASS; }
-int web_cache_cleanup(void) { ++cache_cleanups; return LR_PASS; }
+int web_cleanup_cookies(void) {
+    cookie_event('C'); ++cookie_cleanups; return cookie_cleanup_rc;
+}
+int web_cache_cleanup(void) { cookie_event('K'); ++cache_cleanups; return LR_PASS; }
+int web_add_cookie(const char *value) {
+    int status = cookie_adds == fail_cookie_at ? LR_FAIL : LR_PASS;
+    assert(cookie_adds < SYNTHETIC_COOKIE_CALLS); cookie_event('S');
+    copy_checked(cookie_arguments[cookie_adds++], SYNTHETIC_COOKIE_ARGUMENT, value);
+    return status;
+}
 int web_set_max_html_param_len(const char *value) {
     assert(!strcmp(value, "1048576")); return max_length_rc;
 }
@@ -167,6 +191,7 @@ int web_add_header(const char *name, const char *value) {
 }
 int web_custom_request(const char *name, ...) {
     va_list args; const char *part; snapshot *s;
+    cookie_event('R');
     (void)name; assert(request_count < 32); s = &requests[request_count];
     va_start(args, name);
     while ((part = va_arg(args, const char *))) {

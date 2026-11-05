@@ -1,7 +1,7 @@
 """Selected request bytes and exact literal substitutions, never runtime evaluation.
 
 The static profile rejects every runtime source/extractor/extension, recorded
-authentication/cookie prerequisite, upload and compressed body. Original HAR and
+Authorization prerequisite, upload and compressed body. Cookies use native jars. Original HAR and
 model remain immutable. Managed-header and constant-folding decisions are explicit.
 """
 
@@ -10,6 +10,7 @@ from typing import cast
 from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 from har2load.binding_locations import BindingLocations, SourceViews
+from har2load.cookies import COOKIE_POLICY
 from har2load.domain import Capture, Diagnostic, Exchange, Grouping, Har2LoadError, JSONValue
 from har2load.generation_types import NativeGroup, NativeRequest, RequestPlan
 from har2load.media import mime_signature
@@ -279,7 +280,9 @@ class _Request:
         pairs: list[tuple[str, str]] = []
         size = 0
         for item in headers:
-            name, value = _text(item.get("name")), _text(item.get("value"))
+            name = _text(item.get("name"))
+            # Keep the original index but never interpret or transport discarded cookie data.
+            value = "" if name.lower() == "cookie" else _text(item.get("value"))
             if (not _TOKEN.fullmatch(name) or not value.isascii()
                     or any(ord(c) < 32 and c != "\t" or ord(c) == 127 for c in value)):
                 raise _bad("GENERATION_HEADER_INVALID")
@@ -294,7 +297,13 @@ class _Request:
         result = []
         for index, (name, original) in enumerate(pairs):
             lower = name.lower()
-            if lower in {"cookie", "authorization", "proxy-authorization"}:
+            if lower == "cookie":
+                if index in replacements:
+                    raise _bad("GENERATION_MANAGED_HEADER_BINDING")
+                _decision(self.decisions, {"kind": "native_cookie_header_omitted",
+                    "exchange_id": self.exchange.id, "index": index, "policy": COOKIE_POLICY})
+                continue
+            if lower in {"authorization", "proxy-authorization"}:
                 raise _bad("GENERATION_SESSION_UNSUPPORTED")
             if lower == "content-encoding" and original.lower() != "identity":
                 raise _bad("GENERATION_BODY_UNSUPPORTED")
@@ -337,8 +346,11 @@ class _Request:
         if not isinstance(method, str) or method not in _METHODS:
             raise _bad("GENERATION_METHOD_UNSUPPORTED")
         cookies = self.request.get("cookies", [])
-        if not isinstance(cookies, list) or cookies:
-            raise _bad("GENERATION_SESSION_UNSUPPORTED")
+        if not isinstance(cookies, list):
+            raise _bad("GENERATION_COOKIE_INVALID")
+        if cookies:
+            _decision(self.decisions, {"kind": "native_request_cookies_omitted",
+                "exchange_id": self.exchange.id, "count": len(cookies), "policy": COOKIE_POLICY})
         url = self.url()
         body, kind, mime = self.body(method)
         headers = self.headers(mime)
@@ -414,4 +426,8 @@ class RequestMaterializer:
                                      "reason": "Static immutable constant"})
         except Har2LoadError as error:
             diagnostics.append(Diagnostic(error.code, "error", str(error)))
+        if any(_object(item).get("policy") == COOKIE_POLICY for item in decisions):
+            diagnostics.append(Diagnostic("GENERATION_COOKIE_AUTH_UNVERIFIED", "warning",
+                "Recorded cookies are not replayed as headers; native session availability "
+                "must be verified using scenario authentication or explicit initial cookies."))
         return RequestPlan(tuple(requests), groups, tuple(diagnostics), tuple(decisions))

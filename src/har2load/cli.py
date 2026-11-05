@@ -96,6 +96,11 @@ def parser() -> argparse.ArgumentParser:
     generate.add_argument("--workspace", required=True, type=Path)
     generate.add_argument("--revision", type=int)
     generate.add_argument("--target", choices=("both", "jmeter", "loadrunner"), default="both")
+    generate.add_argument("--initial-cookie", action="append", default=[],
+                          metavar="EXCHANGE_ID:/request/cookies/INDEX",
+                          help="Seed one selected native cookie; repeatable; "
+                          "/response/cookies/INDEX also supported. Default: empty jar, "
+                          "normal scenario authentication.")
     destination = generate.add_mutually_exclusive_group(required=True)
     destination.add_argument("--check", action="store_true", help="Render/check without writing")
     destination.add_argument("--output", type=Path, help="New private output directory")
@@ -131,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             result = app.generate(
                 args.workspace, output=args.output, revision=args.revision,
                 targets=("jmeter", "loadrunner") if args.target == "both" else (args.target,),
+                initial_cookies=tuple(args.initial_cookie),
             )
             if result["status"] == "error":
                 exit_code = 3

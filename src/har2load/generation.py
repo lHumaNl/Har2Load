@@ -7,11 +7,12 @@ partial native file, but the other target and diagnostic reports can be publishe
 import hashlib
 import re
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 from har2load import __version__
+from har2load.cookies import COOKIE_POLICY, plan_initial_cookies
 from har2load.domain import Capture, Diagnostic, Grouping, Har2LoadError, JSONValue
 from har2load.extension_runtime import capability_diagnostics
 from har2load.extensions import TargetExtensions
@@ -252,12 +253,14 @@ class GenerationBuilder:
     def build(
         self, snapshot: WorkspaceSnapshot, capture: Capture, grouping: Grouping,
         base_report: ReportArtifact, targets: tuple[str, ...],
+        initial_cookies: tuple[str, ...] = (),
     ) -> GenerationArtifact:
         if (not targets or len(set(targets)) != len(targets)
                 or any(t not in TARGETS for t in targets)):
             raise Har2LoadError("GENERATION_TARGET_INVALID", "Invalid target selection.", 2)
         selected = tuple(target for target in TARGETS if target in targets)
         plan = GenerationPlanner().build(capture, grouping, snapshot.scenario)
+        plan = replace(plan, initial_cookies=plan_initial_cookies(capture, initial_cookies))
         runtime = plan.runtime is not None
         authored = bool(plan.runtime and (plan.runtime.blocks or plan.runtime.helpers))
         profile = (EXTENSION_RUNTIME_PROFILE if authored else RUNTIME_PROFILE if runtime
@@ -275,7 +278,7 @@ class GenerationBuilder:
         }
         diagnostics = tuple(d for build in builds for d in build.diagnostics)
         document = deepcopy(base_report.document)
-        document["report_schema_version"] = "1.5" if runtime else "1.2"
+        document["report_schema_version"] = "1.6" if runtime else "1.3"
         document["targets"] = {target: target_metadata.get(target, {"status": "not_requested"})
                                for target in TARGETS}
         jmeter_generated = statuses.get("jmeter") == "generated"
@@ -305,8 +308,12 @@ class GenerationBuilder:
         if runtime:
             _runtime_report(document, statuses)
         document["generation"] = {
-            "profile": profile, "profile_version": "2" if authored else "3" if runtime else "1",
+            "profile": profile, "profile_version": "3" if authored else "4" if runtime else "1",
             "producer_version": __version__,
+            "cookie_policy": COOKIE_POLICY,
+            "initial_cookies": [cast(JSONValue, asdict(cookie)) for cookie in plan.initial_cookies],
+            "cookie_initialization": "iteration_start_after_clear",
+            "cookie_authentication": "unverified",
             "requested_targets": list(selected), "decisions": list(plan.decisions),
             "diagnostics": [record(d) for d in diagnostics],
             "native_artifact_digests": {path: _hash(data) for path, data in sorted(files.items())},
@@ -317,7 +324,9 @@ class GenerationBuilder:
                  "Static requests and literal folding only; not the complete dual-target product."),
                 "LoadRunner output is C source scaffold, not a verified runnable VuGen project.",
                 "No target process, captured endpoint or native loader was invoked.",
-                "Recorded cookies/authentication prerequisites require future support.",
+                "Captured cookies are not replayed as fixed headers; native session is unverified.",
+                "Without explicit seeds, normal scenario authentication must establish cookies.",
+                "Recorded Authorization headers remain unsupported; no automatic auth inference.",
             ],
         }
         if runtime:
@@ -346,6 +355,7 @@ class GenerationBuilder:
                 else "blocked" if blocked else "generated"
             ), "files": {path: _hash(data) for path, data in sorted(files.items())},
             "redaction": "off", "contains_sensitive_data": True,
+            "cookie_policy": COOKIE_POLICY, "initial_cookie_count": len(plan.initial_cookies),
             "native_validation": "not_run", "execution": "not_run",
         }
         return GenerationArtifact(files, report, manifest, diagnostics, blocked)

@@ -3,9 +3,11 @@
 from collections.abc import Iterable, Iterator
 from hashlib import sha256
 
+from har2load import loadrunner_cookies as cookies
 from har2load import loadrunner_extensions as extensions
 from har2load import loadrunner_runtime as runtime
 from har2load import loadrunner_sources as sources
+from har2load.cookies import COOKIE_POLICY
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
     GENERATION_PROFILE,
@@ -96,18 +98,31 @@ in parameterizable attributes are rejected, not merged or silently interpreted.
 
 Initialization requests DownloadNonHtmlResources=No and MaxRedirectionDepth=0.
 Options saved at initialization are documented as restored at iteration start.
-Option and service-function return values are unchecked: acceptance of zero,
+Initialization option return values are unchecked: acceptance of zero,
 redirect behavior, automatic headers, and actual wire parity remain unverified.
 A redirect limit can produce a debug failure; continue-on-error does not retry,
 skip an iteration, or explicitly add HTTP calls. Mode=HTTP and Resource=0 are used.
 Cookie/cache cleanup runs before requests on every Action iteration; the native
-cookie jar can then accept fresh server cookies. Captured authentication and
-cookie requirements must have been rejected during common plan validation.
+cookie jar can then accept fresh server cookies. Captured Authorization requirements
+must have been rejected during common plan validation. See cookie seed limits below.
 Transactions use LR_AUTO, not proof of business success or native validation.
 Native runtime configuration may still affect network behavior; review it first.
 
-Sources (API facts only):
 """
+
+
+def _runtime_metadata(model: RuntimePlan) -> dict[str, JSONValue]:
+    result: dict[str, JSONValue] = {
+        "profile": RUNTIME_PROFILE, "profile_version": "4",
+        "limitations": list(runtime.LIMITATIONS), "json_failure_wire_policy": "quoted_error_marker",
+        "runtime_state_isolation": "per_vuser_native_verification_pending",
+        "native_status_policy": RUNTIME_STATUS_POLICY,
+        "input_policy": INPUT_POLICY, "generator_policy": GENERATOR_POLICY,
+    }
+    if extensions.enabled(model):
+        result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="3",
+                      output_commit_policy="per_output_validated_v1")
+    return result
 
 
 def _metadata(plan: RequestPlan | None = None) -> dict[str, JSONValue]:
@@ -116,19 +131,13 @@ def _metadata(plan: RequestPlan | None = None) -> dict[str, JSONValue]:
         "compatibility": "unverified", "native_validation": "not_run",
         "execution": "not_run", "profile": GENERATION_PROFILE, "profile_version": "1",
         "template_status": "pending", "target_version": None,
-        "sources": [_DOC_ROOT + path for path in _DOC_PATHS],
+        "cookie_policy": COOKIE_POLICY,
+        "initial_cookie_count": len(plan.initial_cookies) if plan else 0,
     }
     if plan is not None and plan.runtime is not None:
-        result.update(profile=RUNTIME_PROFILE, profile_version="3",
-                      limitations=list(runtime.LIMITATIONS),
-                      sources=[_DOC_ROOT + path for path in (*_DOC_PATHS, *runtime.DOC_PATHS)],
-                      json_failure_wire_policy="quoted_error_marker",
-                      runtime_state_isolation="per_vuser_native_verification_pending")
-        result["native_status_policy"] = RUNTIME_STATUS_POLICY
-        result.update(input_policy=INPUT_POLICY, generator_policy=GENERATOR_POLICY)
-        if extensions.enabled(plan.runtime):
-            result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="2",
-                          output_commit_policy="per_output_validated_v1")
+        result.update(_runtime_metadata(plan.runtime))
+    result["sources"] = [*(_DOC_ROOT + p for p in _DOC_PATHS), *cookies.DOC_URLS,
+                         *(_DOC_ROOT + p for p in runtime.DOC_PATHS if plan and plan.runtime)]
     return result
 
 
@@ -165,7 +174,7 @@ def _request_errors(request: NativeRequest) -> Iterator[Diagnostic]:
 
 
 def _diagnostics(plan: RequestPlan) -> tuple[Diagnostic, ...]:
-    errors = list(plan.diagnostics)
+    errors = [*plan.diagnostics, *cookies.diagnostics(plan.initial_cookies)]
     if not _membership_valid(plan):
         errors.append(_error("LOADRUNNER_PLAN_INVALID",
                              "Group membership must cover requests exactly once in plan order."))
@@ -272,8 +281,7 @@ def _action_lines(plan: RequestPlan) -> Iterator[str]:
             yield from _body_array(request.body, index)
     yield "\nint Action(void)\n{"
     yield "    lr_continue_on_error(LR_ON_ERROR_CONTINUE);"
-    yield "    web_cleanup_cookies();"
-    yield "    web_cache_cleanup();"
+    yield from cookies.action_lines(plan.initial_cookies, _literal)
     requests = {request.id: (index, request)
                 for index, request in enumerate(plan.requests, start=1)}
     for index, group in enumerate(plan.groups, start=1):
@@ -363,7 +371,7 @@ def _runtime_action(plan: RequestPlan, model: RuntimePlan) -> Iterator[str]:
     yield from runtime.session_lines(model)
     yield "int Action(void) {"
     yield "    lr_continue_on_error(LR_ON_ERROR_CONTINUE);"
-    yield "    web_cleanup_cookies();\n    web_cache_cleanup();"
+    yield from cookies.action_lines(plan.initial_cookies, _literal)
     yield from runtime.reset_lines(model, ("iteration", "request"))
     yield from runtime.event_lines(model, "iteration_start")
     yield from _runtime_groups(plan, model)
@@ -431,11 +439,11 @@ def _scaffold_text(live: bool) -> tuple[str, str, str, str]:
         readme = readme.replace(GENERATION_PROFILE, RUNTIME_PROFILE).replace(
             "Runtime variables, extraction, author code, and helpers are outside this profile.",
             "Runtime subset and limitations:\n" + "\n".join(runtime.LIMITATIONS))
-        readme = readme.replace("Option and service-function return values are unchecked:",
-                                "Initialization/cookie/cache returns remain unchecked;")
         paths += runtime.DOC_PATHS
         readme += sources.INSTRUCTIONS
-    return globals_text, init, end, readme + "\n".join(_DOC_ROOT + path for path in paths) + "\n"
+    readme += cookies.INSTRUCTIONS + "\nSources (API facts only):\n"
+    references = [*(_DOC_ROOT + path for path in paths), *cookies.DOC_URLS]
+    return globals_text, init, end, readme + "\n".join(references) + "\n"
 
 
 class LoadRunnerGenerator:

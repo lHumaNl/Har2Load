@@ -625,9 +625,12 @@ class Application:
     def generate(
         self, workspace: Path, *, output: Path | None = None, revision: int | None = None,
         targets: tuple[str, ...] = ("jmeter", "loadrunner"),
+        initial_cookies: tuple[str, ...] = (),
     ) -> dict[str, JSONValue]:
         snapshot, capture, grouping = self._load(workspace, revision)
-        artifact = self._generation_artifact(workspace, snapshot, capture, grouping, targets)
+        artifact = self._generation_artifact(
+            workspace, snapshot, capture, grouping, targets, initial_cookies,
+        )
         if output is not None:
             GenerationPublisher().publish(artifact, output)
         result = envelope(
@@ -640,19 +643,27 @@ class Application:
         )
         if len(artifact.diagnostics) > 10:
             data = cast(dict[str, JSONValue], result["data"])
-            continuation = cast(dict[str, JSONValue], data["diagnostics_continuation"])
-            continuation["pointer"] = "/" + targets[0] if len(targets) == 1 else ""
+            if initial_cookies:
+                # inspect recomputes default options, not this flag-specific artifact set.
+                data["diagnostics_continuation"] = None
+                data["diagnostics_complete_in"] = (
+                    "report.json:generation.diagnostics; for --check, repeat with the same "
+                    "options and --output NEW_DIRECTORY")
+            else:
+                continuation = cast(dict[str, JSONValue], data["diagnostics_continuation"])
+                continuation["pointer"] = "/" + targets[0] if len(targets) == 1 else ""
         return result
 
     def _generation_artifact(
         self, workspace: Path, snapshot: WorkspaceSnapshot, capture: Capture, grouping: Grouping,
         targets: tuple[str, ...],
+        initial_cookies: tuple[str, ...] = (),
     ) -> GenerationArtifact:
         baseline = (self._load(workspace, snapshot.scenario_revision - 1)[0]
                     if snapshot.scenario_revision > 1 else None)
         return GenerationBuilder().build(
             snapshot, capture, grouping,
-            self._report_artifact(snapshot, capture, grouping, baseline), targets,
+            self._report_artifact(snapshot, capture, grouping, baseline), targets, initial_cookies,
         )
 
 

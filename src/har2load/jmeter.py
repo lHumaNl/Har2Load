@@ -12,9 +12,11 @@ from dataclasses import replace
 from typing import cast
 from urllib.parse import urlsplit
 
+from har2load import jmeter_cookies as cookies
 from har2load import jmeter_extensions as extensions
 from har2load import jmeter_runtime as runtime
 from har2load import jmeter_sources as sources
+from har2load.cookies import COOKIE_POLICY, NativeCookie
 from har2load.domain import Diagnostic, JSONValue
 from har2load.generation_types import (
     GENERATION_PROFILE,
@@ -66,7 +68,7 @@ class JMeterGenerator:
 
     def generate(self, plan: RequestPlan) -> TargetBuild:
         diagnostics = tuple(replace(item, target=TARGET) for item in plan.diagnostics)
-        metadata = _metadata(plan.runtime)
+        metadata = _metadata(plan.runtime, len(plan.initial_cookies))
         if any(item.severity == "error" for item in diagnostics):
             return TargetBuild(TARGET, diagnostics=diagnostics, metadata=metadata)
         try:
@@ -76,40 +78,45 @@ class JMeterGenerator:
             if plan.runtime is not None:
                 _attach_runtime(root, plan.runtime, configs, mappings)
             data = _serialize(root)
-        except (_Rejected, runtime.RuntimeRejected) as error:
+        except (_Rejected, runtime.RuntimeRejected, cookies.CookieRejected) as error:
             diagnostic = Diagnostic(str(error), "error", "JMeter generation is blocked.",
                                     target=TARGET)
             return TargetBuild(TARGET, diagnostics=(*diagnostics, diagnostic), metadata=metadata)
         return TargetBuild(TARGET, {ARTIFACT: data}, tuple(mappings), diagnostics, metadata)
 
 
-def _metadata(runtime_plan: RuntimePlan | None = None) -> dict[str, JSONValue]:
+def _metadata(runtime_plan: RuntimePlan | None = None,
+              cookie_count: int = 0) -> dict[str, JSONValue]:
     authored = bool(runtime_plan and extensions.enabled(runtime_plan))
     return {
         "profile": (EXTENSION_RUNTIME_PROFILE if authored
                     else RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE),
-        "profile_version": "2" if authored else "3" if runtime_plan else "1",
+        "profile_version": "3" if authored else "4" if runtime_plan else "1",
         "artifact_kind": "jmx",
+        "cookie_policy": COOKIE_POLICY, "initial_cookie_count": cookie_count,
         **({"input_policy": INPUT_POLICY, "generator_policy": GENERATOR_POLICY,
             "udv_encoding": sources.UDV_ENCODING} if runtime_plan else {}),
         **({"output_commit_policy": "per_output_validated_v1"} if authored else {}),
         "native_status_policy": RUNTIME_STATUS_POLICY,
         "compatibility": "unverified", "native_validation": "not_run", "execution": "not_run",
         "intended_baseline": {"jmeter": "5.5", "java": "8"},
-        "sources": cast(list[JSONValue], [SOURCE_BASE + path for path in SOURCES] + (
-            runtime.SOURCES + sources.SOURCES if runtime_plan else [])),
-        "limitations": cast(list[JSONValue], runtime.LIMITATIONS) if runtime_plan else [
+        "sources": cast(list[JSONValue], [SOURCE_BASE + path for path in SOURCES]
+                        + cookies.SOURCES + (runtime.SOURCES + sources.SOURCES
+                                             if runtime_plan else [])),
+        "limitations": cast(list[JSONValue], cookies.LIMITATIONS + (runtime.LIMITATIONS
+            if runtime_plan else [
             "Structural XML checks do not establish native compatibility or wire parity.",
             "Static literals only; no runtime bindings, extractors, code, or helper execution.",
             "GET, HEAD, OPTIONS and TRACE bodies are unsupported in this profile.",
             "POST/PUT/PATCH/DELETE require explicit Content-Type to avoid native defaults.",
             "Debug Sampler and View Results Tree may expose sensitive live values at runtime.",
             "Cookie state and transport-managed headers are native behavior, not wire literals.",
-        ],
+        ])),
     }
 
 
 def _captured_strings(plan: RequestPlan) -> Iterator[str]:
+    yield from cookies.strings(plan.initial_cookies)
     for group in plan.groups:
         yield group.id
         yield group.name
@@ -124,6 +131,7 @@ def _captured_strings(plan: RequestPlan) -> Iterator[str]:
 
 
 def _validate(plan: RequestPlan) -> None:
+    cookies.validate(plan.initial_cookies)
     if plan.runtime and any(XML_INVALID.search(value) for value in initial_values(plan.runtime)
                             .values()):
         raise _Rejected("JMETER_XML_CHARACTER_UNSUPPORTED")
@@ -261,7 +269,7 @@ def _document(plan: RequestPlan) -> tuple[ET.Element, list[dict[str, JSONValue]]
     _arguments(test_plan, "TestPlan.user_defined_variables")
     if plan.runtime is not None:
         sources.attach_inputs(test_plan, plan.runtime)
-    _cookie_manager(children)
+    _cookie_manager(children, plan.initial_cookies)
     debug_tree = _thread_group(children)
     mappings: list[dict[str, JSONValue]] = []
     requests = {request.id: request for request in plan.requests}
@@ -275,9 +283,10 @@ def _document(plan: RequestPlan) -> tuple[ET.Element, list[dict[str, JSONValue]]
     return root, mappings
 
 
-def _cookie_manager(parent: ET.Element) -> None:
+def _cookie_manager(parent: ET.Element, initial_cookies: tuple[NativeCookie, ...]) -> None:
     manager, _ = _component(parent, "CookieManager", "CookiePanel", "HTTP Cookie Manager")
-    ET.SubElement(manager, "collectionProp", name="CookieManager.cookies")
+    collection = ET.SubElement(manager, "collectionProp", name="CookieManager.cookies")
+    cookies.attach(collection, initial_cookies)
     _property(manager, "CookieManager.clearEachIteration", True)
     _property(manager, "CookieManager.controlledByThreadGroup", False)
     _property(manager, "CookieManager.policy", "standard")

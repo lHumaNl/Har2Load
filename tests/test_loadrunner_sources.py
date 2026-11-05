@@ -133,7 +133,7 @@ def test_initialize_maps_remain_real_c_functions_and_public_metadata_is_value_fr
         assert row["artifact"] == ACTION
         assert build.files[ACTION].count(str(row["marker"]).encode()) == 1
     assert "PRIVATE_KEY" not in str(build.metadata) and "PRIVATE_SEED" not in str(build.metadata)
-    assert build.metadata["profile_version"] == "3"
+    assert build.metadata["profile_version"] == "4"
 
 
 def test_rejection_budget_is_explicit_and_no_native_status_override() -> None:

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+from har2load.cookies import NativeCookie
 from har2load.domain import Diagnostic, JSONValue
 from har2load.runtime_types import RuntimePlan
 
@@ -34,6 +35,7 @@ class RequestPlan:
     diagnostics: tuple[Diagnostic, ...] = ()
     decisions: tuple[JSONValue, ...] = ()
     runtime: RuntimePlan | None = None
+    initial_cookies: tuple[NativeCookie, ...] = ()
 
 
 @dataclass(frozen=True)

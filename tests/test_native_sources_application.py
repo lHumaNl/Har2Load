@@ -72,7 +72,7 @@ def test_native_input_artifacts_and_generated_sources_are_offline_and_value_priv
     assert digest_tree(workspace) == before
     report = json.loads((output / "report.json").read_bytes())
     manifest = json.loads((output / "manifest.json").read_bytes())
-    assert report["report_schema_version"] == "1.5"
+    assert report["report_schema_version"] == "1.6"
     assert report["generation"]["native_input_policy"] == "native_initial_snapshot_v1"
     assert report["generation"]["generator_policy"] == "per_user_generated_scalars_v1"
     assert report["generation"]["missing_input_policy"] == "marker_and_continue"

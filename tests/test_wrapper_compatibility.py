@@ -10,7 +10,7 @@ from har2load.importer import HarImporter
 from har2load.scenario import ScenarioEditor
 
 
-@pytest.mark.parametrize("producer", ["0.5.0a1", "0.6.0a1", "0.7.0a1", "0.8.0a1"])
+@pytest.mark.parametrize("producer", ["0.5.0a1", "0.6.0a1", "0.7.0a1", "0.8.0a1", "0.9.0a1"])
 def test_previous_extension_producers_remain_readable_and_explicitly_upgradable(
     tmp_path, monkeypatch, producer,
 ):

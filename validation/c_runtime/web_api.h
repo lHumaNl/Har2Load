@@ -10,5 +10,6 @@ int web_custom_request(const char *, ...);
 int web_add_header(const char *, const char *);
 int web_set_option(const char *, ...);
 int web_cleanup_cookies(void);
+int web_add_cookie(const char *);
 int web_cache_cleanup(void);
 #endif

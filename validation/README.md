@@ -199,3 +199,51 @@ and emitted both targets with verified manifest hashes. All 36 source modules ma
 the wheel and installed bytes. Final wheel SHA-256:
 `b977de7116d6c70a21f0becb8e6c67e082c44f40f4b5d63f5136dead7f61926c`.
 Git publication is separate from these synthetic validation results.
+
+## Native cookie sessions and opt-in seeds — 2026-11-05, 0.10.0a1
+
+`jmeter/test_cookies.py` and `CookieHarness.groovy` load synthetic generated JMX,
+run real precompilation, and exercise native CookieManager lifecycle APIs. The
+cookie batch covers 20 static/runtime cases with two workers each: empty default,
+explicit seeds, domain/host/path/Secure matching, response-driven replacement,
+per-worker isolation and next-main-iteration seed restoration. It does not start
+an HTTP engine or make requests. Four controls demonstrate why unsupported cases
+are rejected: function interpretation, acceptance of expired manual seeds,
+CookiePanel GUI scope/expiry loss and IPv6 native host mismatch.
+
+`c_runtime/test_cookies.py` adds 30 tests to the prior 181. These compile actual
+static/runtime output and inspect native API call order, seed arguments, expiry
+formatting, repeated iterations and failure/status handling. The deliberate SDK
+stubs **do not simulate a cookie jar** and do not establish domain/path/expiry,
+server-cookie updates, native status side effects or concurrent Vuser parity.
+
+Ordinary preparation remains offline and never runs this harness. The cookie
+option is not a runtime extractor; default generation omits captured Cookie data
+and relies on normal scenario authentication. Selection and scope inference are
+recorded in private reports, not silently applied to the scenario model.
+
+The final cookie batch additionally verifies same-name cookies at `/` and `/app`:
+both survive native loading, the longer path precedes the shorter path, response
+replacement affects only the matching identity, and iteration restoration/worker
+isolation retain both seeds. It uses indexed collection keys rather than cookie
+names as property identity.
+
+Lead verification: **1682 default tests passed** through both pytest entry points,
+Ruff and mypy (39 modules) passed; **215 native tests skip** without explicit opt-in.
+The fresh full isolated run `har2load-cookie-integrated-gfAd6U` passed **215 tests
+in 386.23s** (211 C + four JMeter batches), with 18 cookie cases at that point.
+After the test-only multi-path enhancement, the lead reran the cookie batch in
+`har2load-cookie-lead-final-VzjUVc`: **20 cases × two workers**, four controls passed.
+Production code did not change. Do not describe the earlier full run as containing
+the later cases. All 227 full-run JMX digests and 20 follow-up JMX digests were
+checked; the latest four-batch fixture set comprises 229 JMX files.
+
+Final evidence: `har2load-cookie-lead-final-VzjUVc/lead-verification.json` under the
+approved temporary root, SHA-256
+`48c3f2761d7fbdd310999b1c08830952a6216d24619c7c6d252fbbbf00dba281`.
+Installed compatibility used a real 0.9 wheel rebuilt from committed `25e770c`
+(old temporary artifacts had expired), then installed 0.10 and verified default
+and selected-cookie generation, historical reads, immutable HAR/model objects,
+native artifacts and manifest hashes. All 39 source modules match wheel/installed
+bytes. Final wheel SHA-256:
+`dcdbfd2ee7f7ccf60c8a363f9a1bee505bc314ad601e99f0ac1ca4765f5fcfbd`.

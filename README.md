@@ -40,6 +40,8 @@ application does not contain an LLM client or contact captured endpoints.
   calls and per-output publication; correlation markers never override native result status.
 - Native initial strings in JMeter Test Plan UDV and bounded VuGen `.prm/.dat`
   integration assets; five lifecycle-driven scalar generators, without a JSON input loader.
+- Native cookie sessions: empty initial jars by default, with explicit selected HAR
+  cookie seeds through `generate --initial-cookie`; no fixed captured Cookie headers.
 
 **Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
@@ -48,7 +50,7 @@ extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.9.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.10.0a1` writes workspace schema `2.0` with scenario
 schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -64,6 +66,8 @@ Existing `0.8.0a1` workspaces remain readable/editable. Adding `source.initial_v
 requires audited `upgrade_native_inputs` from scenario 1.4 to 1.5. The upgrade
 preserves existing declarations and never invents initial values; historical revisions
 retain their original schema.
+Existing `0.9.0a1` workspaces remain readable. Cookie generation options require no
+schema upgrade and never mutate the model; the generated private report records them.
 
 ## Install
 
@@ -301,14 +305,94 @@ by Connection. Every omission is listed in materialization decisions; binding to
 an omitted field is rejected. Native clients manage transport framing. Selected
 Content-Type is retained or supplied from the chosen body metadata; no response
 Content-Type is substituted for it. URL fragments are explicitly omitted as
-non-HTTP data. Captured authentication headers or nonempty Cookie/cookies state
-are rejected: this profile cannot establish initial session prerequisites.
+non-HTTP data. Captured Authorization/Proxy-Authorization headers remain rejected.
+Recorded Cookie headers and request cookie arrays are omitted under
+`native_cookie_jar_v1`: normal scenario authentication and the native jar manage
+the session. Omissions are recorded, and `GENERATION_COOKIE_AUTH_UNVERIFIED` warns
+that session availability is not proven. Malformed cookie-array shape and bindings
+to a managed Cookie header remain errors.
 
 Missing bodies are not invented. POST/PUT/PATCH without postData need explicit
 `bodySize: 0`; a positive known body size without data is blocked. Multipart/file
 uploads, compressed request bodies, non-UTF-8 body encodings, invalid header data,
 and unknown methods are unsupported. This deliberately conservative alpha may
 reject real captures that later profiles will support.
+
+### Native cookie sessions and optional initial cookies
+
+By default, JMeter has an enabled **empty HTTP Cookie Manager** and LoadRunner uses
+its native cookie jar. The actual login flow should obtain fresh server cookies.
+Recorded request cookies are neither copied into initial configuration nor replayed
+as fixed headers. Har2Load does not invent a missing login flow or infer that a
+recorded session is still valid. Authorization header handling remains separate.
+
+To deliberately bootstrap a jar, select individual entries from the immutable HAR:
+
+```sh
+har2load inspect --workspace workspaces/demo --exchange EXCHANGE_ID \
+  --section entry --pointer /response/cookies
+
+har2load generate --workspace workspaces/demo --revision 2 --check \
+  --initial-cookie 'EXCHANGE_ID:/response/cookies/0'
+
+har2load generate --workspace workspaces/demo --revision 2 \
+  --output workspaces/cookie-seeded-r2 \
+  --initial-cookie 'EXCHANGE_ID:/request/cookies/0' \
+  --initial-cookie 'OTHER_EXCHANGE_ID:/response/cookies/1'
+```
+
+Replace the placeholder IDs with exact IDs from `summary`; indices are zero-based.
+`--initial-cookie` is repeatable, at most 256 selections. It accepts only explicit
+`/request/cookies/N` or `/response/cookies/N` array entries, not a Cookie/Set-Cookie
+header, name-only matching, or an implicit "all cookies" import. Duplicate selections
+and duplicate `(domain, name, path)` identities fail rather than choosing a winner.
+An invalid selection fails before publication. No secret value is passed on the CLI.
+
+Selection is a **generation option**, not a model edit. Repeat the same flags and
+revision to reproduce it. The generated private report retains values, source
+exchange/area/index, attributes and inference flags; ordinary output exposes only
+policy/counts. Raw HAR and historical model revisions remain unchanged. Redaction
+is off: seeded JMX/C and private reports contain the selected values.
+
+The bounded selection profile preserves name/value, effective domain/path, Secure,
+expiry and HttpOnly/SameSite metadata. Missing domain means host-only for the source
+request host; an explicit domain must equal that host (one leading dot and case are
+normalized). Parent-domain, unrelated-domain and non-ASCII-domain selections are
+not supported. Missing path uses the source URL's RFC default directory; no URL
+decoding occurs. Missing Secure conservatively means true for HTTPS, false for HTTP.
+Explicit expiry must be a positive whole-second timezone-qualified ISO timestamp;
+preparation never consults the live clock, extends expiry or converts it to a session
+cookie. These rules are disclosed inference, not proof of the browser's original scope.
+
+The current debug profile retains **reset each main iteration**: JMeter restores
+its initial Cookie Manager collection; LoadRunner clears then applies selected
+`web_add_cookie` seeds at Action start. Server cookies update the active jar between
+requests; seeds are not reapplied per request. All users start with the same selected
+seed values, so an opt-in seed is not a unique-user credential mechanism. A future
+configurable session-persistence policy is not implemented.
+
+Target limits are explicit, never silent scope/value changes:
+
+- JMeter 5.5 XML can retain host-only flags, but its GUI cookie-table rebuild loses
+  them; do not assume scope-preserving GUI edits. Persistent/expiring seeds are
+  blocked because native manual-cookie matching does not reliably enforce expiry.
+- LoadRunner's documented `web_add_cookie` requires Domain; host-only seeds are
+  blocked rather than broadened. Its cookie scope/expiry and native API behavior
+  remain SDK-unverified.
+- Both targets restrict unsafe literal/metasyntax values and reject explicit
+  SameSite seeds. HttpOnly metadata is retained, but native browser/JavaScript
+  enforcement is not claimed. Per-target diagnostics describe capability refusal;
+  another supported target may still be published.
+- IPv6 cookie seeds are unsupported: the pinned JMeter API does not match the
+  normalized seed domain to its bracketed URL host; the LoadRunner adapter also
+  rejects that representation. This restriction does not reject IPv6 requests
+  without initial IPv6 cookies. Native seed values use a bounded unquoted ASCII
+  cookie-value subset; rejected values are not silently decoded or rewritten.
+
+No custom JSON loader or runtime cookie extractor is added. `inspect` materialized
+requests/generation diagnostics uses **default generation options**, not a prior
+flagged run. Review the flagged run's `report.json`; for a truncated flagged `--check`,
+repeat with the same options and `--output NEW_DIRECTORY` to obtain all diagnostics.
 
 ### JMeter artifact
 
@@ -350,8 +434,11 @@ duplicate header names whose native behavior cannot be preserved by this profile
 Transaction/request names are generated safe IDs; original labels remain in the
 model/report rather than becoming C source. Runtime cookie/cache cleanup and
 continue-on-error are requested. Redirect/resource options are emitted, but native
-acceptance and their actual effects are unverified; service return values are
-currently unchecked. System C compilation is not a native VuGen compatibility test.
+acceptance and their actual effects are unverified. With selected cookie seeds,
+cookie cleanup/addition return values are checked and failures logged without a
+generated status override; native API failures may still have native status effects.
+Cache cleanup and seedless cookie cleanup returns remain unchecked. System C
+compilation is not a native VuGen compatibility test.
 
 ### Publication, partial results and provenance
 
@@ -370,7 +457,7 @@ and choose a new destination. It is not a hostile-filesystem or universal power-
 guarantee. Default stdout is value-free metadata; explicit materialization inspection,
 native files and reports are **private/unredacted**.
 
-The generated report (schema 1.2) links the pinned model revision and capture hash
+The generated report (schema 1.3) links the pinned model revision and capture hash
 to actual file digests and stable JMX component paths/C markers. It records constant
 folding, header policy, per-target limitations and generation diagnostics. No source
 map claims a runtime variable that was optimized away. Ordinary `report` remains
@@ -431,7 +518,7 @@ are not fallback live values. Unbound fields remain capture-derived data.
   normalized headers or a persistent cookie jar as equivalent to HAR response arrays.
 
 Existing static request prerequisites still apply: unsupported uploads, compression,
-initial recorded authentication/cookies and unresolved request representations are
+recorded Authorization headers and unresolved request representations are
 not made safe merely by adding runtime variables. Target-specific errors can still
 leave another target's files and diagnostic reports; exit status remains 3 if any
 requested target is blocked.
@@ -545,14 +632,14 @@ live values are small—for example, three maximum-size JSON slots exceed 1 MiB.
 Native representation details such as numeric spelling/negative zero may differ;
 successful JSON numeric values are not intentionally converted through binary floats.
 
-The runtime report uses schema **1.5**; static generation remains 1.2 and ordinary
+The runtime report uses schema **1.6**; static generation uses 1.3 and ordinary
 model-only `report` remains 1.1. Runtime maps link each variable, initializer, reset,
 extractor and binding to actual native locations and file hashes; missing, duplicate
 or unexpected declaration mappings refuse publication. Removed mappings remain in
 revision history. Reports disclose failure-wire policy and per-target implementation
 status separately from captured extraction checks. The scalar runtime profile now
-reports `profile_version: "3"` for native inputs/generators. Authored wrappers use
-`authored_scalar_runtime_v1`, version 2, with `per_output_validated_v1` publication.
+reports `profile_version: "4"` for native cookie preparation. Authored wrappers use
+`authored_scalar_runtime_v1`, version 3, with `per_output_validated_v1` publication.
 
 **Runtime correctness/native compatibility is not certified by these artifacts.**
 The default Python `tests/` suite inspects structure, data, ordering and contracts;
@@ -1202,7 +1289,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.9.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.10.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

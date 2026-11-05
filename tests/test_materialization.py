@@ -35,6 +35,30 @@ def build(values):
     return RequestMaterializer().build(*values)
 
 
+@pytest.mark.parametrize("discarded", ["session=é", "session=${untrusted}", "bad\r\nvalue"])
+def test_discarded_cookie_header_value_does_not_block_or_shift_other_bindings(discarded):
+    values = fixture({"headers": [{"name": "Cookie", "value": discarded},
+                                  {"name": "X-Token", "value": "old"}]})
+    literal(values[2], values[0], "request_header", "new", index=1)
+    before = values[0].raw_bytes
+    plan = build(values)
+    assert not any(d.severity == "error" for d in plan.diagnostics)
+    assert plan.requests[0].headers == (("X-Token", "new"),)
+    assert values[0].raw_bytes == before
+    assert any(d.code == "GENERATION_COOKIE_AUTH_UNVERIFIED" for d in plan.diagnostics)
+
+
+@pytest.mark.parametrize("discarded", [None, {"malformed": "but unused"}])
+def test_unused_cookie_header_data_is_ignored_without_weakening_binding_validation(discarded):
+    values = fixture({"headers": [{"name": "Cookie", "value": discarded},
+                                  {"name": "X-Token", "value": "old"}]})
+    plan = build(values)
+    assert not any(d.severity == "error" for d in plan.diagnostics)
+    assert plan.requests[0].headers == (("X-Token", "old"),)
+    literal(values[2], values[0], "request_header", "new", index=1)
+    assert any(d.code == "BINDING_TARGET_INVALID" for d in build(values).diagnostics)
+
+
 def test_static_wire_values_and_raw_bytes_are_preserved():
     values = fixture({"method": "POST", "postData": {"mimeType": "text/plain",
                                                        "text": 'line\r\n雪 ${untrusted} {x} \\'},
@@ -104,7 +128,7 @@ def test_managed_headers_are_omitted_with_explicit_decisions():
 @pytest.mark.parametrize("raw_request,code", [
     ({"method": "CONNECT"}, "GENERATION_METHOD_UNSUPPORTED"),
     ({"method": "POST"}, "GENERATION_BODY_UNAVAILABLE"),
-    ({"cookies": [{"name": "s", "value": "secret"}]}, "GENERATION_SESSION_UNSUPPORTED"),
+    ({"cookies": "malformed"}, "GENERATION_COOKIE_INVALID"),
     ({"headers": [{"name": "Authorization", "value": "secret"}]}, "GENERATION_SESSION_UNSUPPORTED"),
     ({"headers": [{"name": "X", "value": "line\r\ninjected"}]}, "GENERATION_HEADER_INVALID"),
     ({"url": "https://user:secret@example.invalid/"}, "GENERATION_URL_UNSUPPORTED"),
