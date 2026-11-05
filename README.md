@@ -3,9 +3,11 @@
 Offline HAR inspection and revisioned scenario preparation. **Early alpha,
 not a complete load-test generator.**
 
-Har2Load's intended workflow is one HAR → reviewable scenario model → externally
-assisted parameterization/correlation → JMeter and LoadRunner artifacts. The
-application does not contain an LLM client or contact captured endpoints.
+Start with an external agent and a HAR file/directory, or use the CLI directly.
+The agent clarifies the recording-to-use-case relationship and invokes the tool;
+no prior manual import is required. The deterministic core still imports one HAR
+per workspace: reviewable model → parameterization/correlation → JMeter and
+LoadRunner artifacts. The application has no LLM client and contacts no captured endpoints.
 
 ## Implemented
 
@@ -42,13 +44,16 @@ application does not contain an LLM client or contact captured endpoints.
   integration assets; five lifecycle-driven scalar generators, without a JSON input loader.
 - Native cookie sessions: empty initial jars by default, with explicit selected HAR
   cookie seeds through `generate --initial-cookie`; no fixed captured Cookie headers.
+- Native response-header sources for existing variables, bindings and lifecycle.
+- External [har2load skill](skills/har2load/SKILL.md): agent-first intake, audited CLI
+  preparation, read-only review instructions and cautious JMeter UC transfer guidance.
 
 **Not implemented yet:** explicit boundary overrides, filters, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
 response-cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
-author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
+CLI JMX composition, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
 interchange format. Version `0.11.0a1` writes workspace schema `2.0` with scenario
 schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
@@ -96,7 +101,42 @@ py -3.12 -m venv .venv
 are portable installation instructions, not a claim of tested Windows/Linux
 compatibility. No `uv` installation is required.
 
-## Usage
+## Agent-first usage
+
+Give your agent access to [skills/har2load/SKILL.md](skills/har2load/SKILL.md) and its
+`references/` directory, using the skill-loading mechanism of your agent harness.
+The skill is distributed separately from the Python wheel: installing `har2load`
+does not register a skill in your agent configuration. It contains instructions,
+not a hidden runner, installer, model client or JMeter composer.
+
+Example request (adapt the paths and use your preferred language):
+
+> Use the har2load skill. The HAR recordings are in `./recordings` and the tool is
+> at `./.venv/bin/har2load` (or find it in PATH). Prepare JMeter artifacts under
+> `./workspaces`. Clarify the relationship between recordings and the desired UC
+> layout when it is not already clear; otherwise proceed. Do not run load.
+
+The agent finds/checks the tool, inventories the supplied files, asks only material
+questions, imports each selected recording into its own fresh workspace, then uses
+analysis/inspection and audited changesets before validation/reporting/generation.
+Repeated recordings can support one UC; unrelated UCs can need separate artifacts
+or a later common JMX. Filenames and matching URLs are not identity proof. The
+agent confirms primary recordings and labels such as `TF_UC1` or `TF_UC1.1` rather
+than inventing their meaning. Existing workspaces can also be resumed without import.
+
+For a common JMX, the skill explains dependency-aware external/manual transfer:
+copying TFs alone can omit inputs, cookies, initialization, Module Controller paths
+and runtime-state isolation. A derived plan needs its own checks and provenance;
+the original manifests remain unchanged. There is **no CLI merge command yet**.
+For this workflow, use one UC per VuGen Solution; current LoadRunner output remains
+a C scaffold, not a complete Solution. Datasets/CSV remain outside the core.
+
+For review only, ask the agent to use the same skill in **read-only review mode**,
+providing the workspace, revision and artifact paths. It reports findings without
+applying changes, publishing new outputs or executing native code. Native checking
+and load/replay need separate explicit authorization. Redaction remains off.
+
+## Manual CLI usage
 
 Examples below assume the virtual environment is activated, or that `har2load`
 is replaced by its full path above.
