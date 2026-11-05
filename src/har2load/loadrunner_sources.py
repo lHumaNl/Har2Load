@@ -228,7 +228,7 @@ def diagnostics(plan: RuntimePlan) -> list[Diagnostic]:
         if source["kind"] != "external":
             continue
         key, value = cast(str, source["key"]), source.get("initial_value")
-        if (not _KEY.fullmatch(key) or key == "H2L_RESPONSE" or
+        if (not _KEY.fullmatch(key) or key in ("H2L_RESPONSE", "H2L_RESPONSE_HEADERS") or
                 (value is not None and not _safe_initial(cast(str, value)))):
             errors.append(Diagnostic("LOADRUNNER_NATIVE_INPUT_REPRESENTATION_UNSUPPORTED", "error",
                 "Native file input requires a safe key and nonempty single-line ASCII value; "

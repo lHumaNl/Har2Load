@@ -114,13 +114,13 @@ def test_metadata_is_value_free_and_versions_policies_are_explicit() -> None:
     build = JMeterGenerator().generate(candidate)
     assert b"SYNTHETIC_PRIVATE_SENTINEL" in build.files["jmeter/scenario.jmx"]
     metadata = build.metadata
-    assert metadata["profile_version"] == "4"
+    assert metadata["profile_version"] == "5"
     assert metadata["input_policy"] == "native_initial_snapshot_v1"
     assert metadata["generator_policy"] == "per_user_generated_scalars_v1"
     assert metadata["udv_encoding"] == "jmeter_udv_literal_v1"
     assert "SYNTHETIC_PRIVATE_SENTINEL" not in json.dumps(metadata)
     assert "private_key" not in json.dumps(metadata)
-    assert JMeterGenerator().generate(authored()).metadata["profile_version"] == "3"
+    assert JMeterGenerator().generate(authored()).metadata["profile_version"] == "4"
 
 
 @pytest.mark.parametrize("name", ["__jm__DebugTG__idx", "__jm__future", "__jmv_SAME_USER",

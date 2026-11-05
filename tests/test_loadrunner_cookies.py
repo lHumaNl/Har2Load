@@ -43,7 +43,7 @@ def test_default_jar_has_no_initial_cookie_api_calls(live: bool) -> None:
     assert source.count("web_cache_cleanup()") == 1
     assert build.metadata["cookie_policy"] == COOKIE_POLICY
     assert build.metadata["initial_cookie_count"] == 0
-    assert build.metadata["profile_version"] == ("4" if live else "1")
+    assert build.metadata["profile_version"] == ("5" if live else "1")
 
 
 @pytest.mark.parametrize("live", [False, True])
@@ -133,7 +133,7 @@ def test_authored_wrapper_retains_source_and_maps_with_initial_seeds() -> None:
     model = authored("/* opaque source, never compiled here */ not valid C;")
     baseline = LoadRunnerGenerator().generate(model)
     build = LoadRunnerGenerator().generate(replace(model, initial_cookies=(cookie(),)))
-    assert build.metadata["profile_version"] == "3"
+    assert build.metadata["profile_version"] == "4"
     assert build.metadata["profile"] == "authored_scalar_runtime_v1"
     assert build.source_map == baseline.source_map
     assert b"not valid C;" in build.files[ACTION]

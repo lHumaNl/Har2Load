@@ -93,8 +93,9 @@ def test_shared_key_has_one_definition_and_snapshot() -> None:
     assert build.files[ACTION].count(b'"{token}"') == 1
 
 
-def test_native_capture_reserved_key_is_blocked() -> None:
-    value = source_plan(external(key="H2L_RESPONSE", initial_value="x"))
+@pytest.mark.parametrize("key", ["H2L_RESPONSE", "H2L_RESPONSE_HEADERS"])
+def test_native_capture_reserved_key_is_blocked(key: str) -> None:
+    value = source_plan(external(key=key, initial_value="x"))
     build = LoadRunnerGenerator().generate(value)
     assert build.status == "blocked"
 
@@ -133,7 +134,7 @@ def test_initialize_maps_remain_real_c_functions_and_public_metadata_is_value_fr
         assert row["artifact"] == ACTION
         assert build.files[ACTION].count(str(row["marker"]).encode()) == 1
     assert "PRIVATE_KEY" not in str(build.metadata) and "PRIVATE_SEED" not in str(build.metadata)
-    assert build.metadata["profile_version"] == "4"
+    assert build.metadata["profile_version"] == "5"
 
 
 def test_rejection_budget_is_explicit_and_no_native_status_override() -> None:

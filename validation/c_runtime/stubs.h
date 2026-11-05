@@ -32,6 +32,15 @@ static size_t response_size;
  * This deliberately small contract is NOT an SDK response/capture emulator. */
 static const unsigned char *scheduled_response = (const unsigned char *)"";
 static size_t scheduled_response_size;
+/* Independent header channel: only Scope=Headers registration publishes these bytes.
+ * This models an explicit fake contract, NOT native SDK serialization or overflow. */
+static const unsigned char *header_response = (const unsigned char *)"";
+static const unsigned char *scheduled_headers = (const unsigned char *)"";
+static size_t header_response_size, scheduled_headers_size;
+static char saved_headers[1048578];
+static int headers_eval_rc, headers_eval_calls, headers_eval_null;
+static int headers_save_calls, headers_save_fail_at = -1, headers_register_rc;
+static int headers_registrations, headers_registered;
 static int eval_rc, eval_calls, eval_frees, error_calls, output_calls, save_calls;
 static int eval_null_output, eval_null_frees;
 static int save_fail_at = -1, register_rc, max_length_rc, header_rc, http_rc;
@@ -104,7 +113,20 @@ static void publish_parameter(const unsigned char *bytes, size_t length) {
     memmove(saved_parameter, bytes, length); saved_parameter[length] = 0;
     response = (const unsigned char *)saved_parameter; response_size = length;
 }
+static void publish_headers(const unsigned char *bytes, size_t length) {
+    assert(length < sizeof(saved_headers));
+    memmove(saved_headers, bytes, length); saved_headers[length] = 0;
+    header_response = (const unsigned char *)saved_headers; header_response_size = length;
+}
+static void headers_reset(void) {
+    header_response = scheduled_headers = (const unsigned char *)"";
+    header_response_size = scheduled_headers_size = 0; saved_headers[0] = 0;
+    headers_eval_rc = headers_eval_calls = headers_eval_null = 0;
+    headers_save_calls = headers_register_rc = headers_registrations = headers_registered = 0;
+    headers_save_fail_at = -1;
+}
 static void stub_reset(void) {
+    headers_reset();
     response = (const unsigned char *)""; response_size = 0;
     scheduled_response = (const unsigned char *)""; scheduled_response_size = 0;
     eval_rc = eval_calls = eval_frees = error_calls = output_calls = save_calls = 0;
@@ -129,9 +151,17 @@ int lr_error_message(const char *format, ...) {
 int lr_output_message(const char *format, ...) {
     (void)format; ++output_calls; return 0;
 }
+static int eval_headers(int length, char **out, unsigned long *n) {
+    assert(length == 22); ++headers_eval_calls;
+    if (headers_eval_null) { *out = NULL; *n = 0; return headers_eval_rc; }
+    *n = (unsigned long)header_response_size;
+    *out = malloc(header_response_size ? header_response_size : 1); assert(*out);
+    memcpy(*out, header_response, header_response_size); return headers_eval_rc;
+}
 int lr_eval_string_ext(const char *name, int length, char **out,
                        unsigned long *n, int a, int b, int c) {
     assert(a == 0 && b == 0 && c == -1); ++eval_calls;
+    if (!strcmp(name, "{H2L_RESPONSE_HEADERS}")) return eval_headers(length, out, n);
     /* Explicit NULL-result seam, independent of return status; not SDK emulation. */
     if (eval_null_output) {
         if (strcmp(name, "{H2L_RESPONSE}")) ++native_eval_calls;
@@ -149,6 +179,10 @@ void lr_eval_string_ext_free(const char **p) {
     free((void *)*p); *p = NULL; ++eval_frees;
 }
 int lr_save_string(const char *value, const char *name) {
+    if (!strcmp(name, "H2L_RESPONSE_HEADERS")) {
+        if (headers_save_calls++ == headers_save_fail_at) return LR_FAIL;
+        publish_headers((const unsigned char *)value, strlen(value)); return LR_PASS;
+    }
     assert(!strcmp(name, "H2L_RESPONSE"));
     if (save_calls++ == save_fail_at) return LR_FAIL;
     publish_parameter((const unsigned char *)value, strlen(value)); return LR_PASS;
@@ -177,12 +211,19 @@ int web_set_max_html_param_len(const char *value) {
 }
 int web_reg_save_param_ex(const char *first, ...) {
     va_list args; const char *part; int count = 0;
-    const char *expected[] = {"LB=", "RB=", "NotFound=warning", SEARCH_FILTERS, "Scope=Body"};
-    assert(!strcmp(first, "ParamName=H2L_RESPONSE")); va_start(args, first);
+    int header = !strcmp(first, "ParamName=H2L_RESPONSE_HEADERS");
+    const char *expected[] = {"LB=", "RB=", "NotFound=warning", SEARCH_FILTERS,
+                             header ? "Scope=Headers" : "Scope=Body", "IgnoreRedirections=No"};
+    assert(header || !strcmp(first, "ParamName=H2L_RESPONSE")); va_start(args, first);
     while ((part = va_arg(args, const char *))) {
-        assert(count < 5 && !strcmp(part, expected[count++]));
+        assert(count < (header ? 6 : 5) && !strcmp(part, expected[count++]));
     }
-    va_end(args); assert(count == 5); ++registration_count;
+    va_end(args); assert(count == (header ? 6 : 5));
+    if (header) {
+        ++headers_registrations; headers_registered = headers_register_rc == LR_PASS;
+        return headers_register_rc;
+    }
+    ++registration_count;
     capture_registered = register_rc == LR_PASS; return register_rc;
 }
 int web_add_header(const char *name, const char *value) {
@@ -212,6 +253,8 @@ int web_custom_request(const char *name, ...) {
     s->status = request_count == fail_http_at ? LR_FAIL : http_rc;
     if (capture_registered && s->status == LR_PASS)
         publish_parameter(scheduled_response, scheduled_response_size);
-    ++request_count; capture_registered = 0;
+    if (headers_registered && s->status == LR_PASS)
+        publish_headers(scheduled_headers, scheduled_headers_size);
+    ++request_count; capture_registered = headers_registered = 0;
     return s->status;
 }

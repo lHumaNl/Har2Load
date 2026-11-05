@@ -231,7 +231,7 @@ def test_declared_unbound_extractors_and_variables_are_not_dropped() -> None:
     assert "log.warn('ERROR_EXTRACTOR_' + e.id)" in prop(node, "script")
 
 
-@pytest.mark.parametrize("area", ["response_headers", "response_cookies"])
+@pytest.mark.parametrize("area", ["response_cookies"])
 def test_unsupported_response_item_semantics_block_atomically(area: str) -> None:
     candidate = correlation()
     assert candidate.runtime is not None

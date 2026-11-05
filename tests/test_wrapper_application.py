@@ -115,13 +115,13 @@ def test_opted_in_output_free_blocks_and_helper_maps_are_generated_once(tmp_path
     result = app.generate(workspace, output=output)
     assert result["status"] == "ok", result
     report = json.loads((output / "report.json").read_bytes())
-    assert report["report_schema_version"] == "1.6"
+    assert report["report_schema_version"] == "1.7"
     assert report["generation"]["profile"] == "authored_scalar_runtime_v1"
     assert report["generation"]["native_status_policy"] == "markers_only_native_status_v1"
     assert report["generation"]["output_commit_policy"] == "per_output_validated_v1"
     assert_real_locators(output, report["source_map"])
     for target in ("jmeter", "loadrunner"):
-        assert report["targets"][target]["profile_version"] == "3"
+        assert report["targets"][target]["profile_version"] == "4"
         assert report["targets"][target]["output_commit_policy"] == "per_output_validated_v1"
         rows = [r for r in report["source_map"] if r["target"] == target]
         calls = [r for r in rows if r["kind"] == "helper_call"]

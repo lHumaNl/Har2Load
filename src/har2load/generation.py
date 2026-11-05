@@ -21,6 +21,7 @@ from har2load.jmeter import JMeterGenerator
 from har2load.loadrunner import LoadRunnerGenerator
 from har2load.presentation import record
 from har2load.reporting import ReportArtifact, ReportBuilder, ReportPublisher
+from har2load.response_headers import RESPONSE_HEADER_POLICY, header_diagnostics
 from har2load.runtime_planning import GenerationPlanner
 from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY, source_diagnostics
 from har2load.runtime_types import (
@@ -107,6 +108,7 @@ def _target(
     if plan.runtime is not None:
         diagnostics.extend(capability_diagnostics(plan.runtime, name))
         diagnostics.extend(source_diagnostics(plan.runtime, name))
+        diagnostics.extend(header_diagnostics(plan.runtime, name))
     generator = JMeterGenerator() if name == "jmeter" else LoadRunnerGenerator()
     return generator.generate(replace(plan, diagnostics=tuple(diagnostics)))
 
@@ -171,6 +173,8 @@ def _parameter_map(
 
 def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValue]) -> None:
     target_statuses = {target: statuses.get(target, "not_requested") for target in TARGETS}
+    parameters = cast(dict[str, JSONValue], document["parameters"])
+    extractors = {item["id"]: item for item in _objects(parameters["extractors"])}
     input_definitions: dict[str, list[JSONValue]] = {}
     for variable in _objects(document["variables"]):
         declaration = cast(dict[str, JSONValue], variable["declaration"])
@@ -206,6 +210,16 @@ def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValu
                 "per_binding_regeneration": False, "runtime_value": "not_generated",
                 "security_token_guarantee": False, "cross_target_identical_stream": False,
             }
+        elif source["kind"] == "extracted":
+            extractor = extractors[source["extractor_id"]]
+            if extractor["area"] == "response_headers":
+                formation["native_header"] = {
+                    "policy": RESPONSE_HEADER_POLICY,
+                    "producer_exchange_id": extractor["exchange_id"],
+                    "refresh": "declared_producer_attempt", "har_parity": "unverified",
+                    "cookie_jar_used": False, "automatic_refresh_inference": False,
+                    "value_type": "string", "native_validation": "not_run",
+                }
     for item in _objects(document["external_inputs"]):
         source = cast(dict[str, JSONValue], item["declaration"])
         supplied = bool(input_definitions.get(cast(str, source["key"])))
@@ -237,6 +251,8 @@ def _runtime_report(document: dict[str, JSONValue], statuses: dict[str, JSONValu
         "Explicit native initial strings are preserved with redaction off, including secrets.",
         "Generated values are runtime-only; no global uniqueness or cryptographic promise.",
         "Native crashes, undefined behavior, infinite loops and side effects are not contained.",
+        "Header extraction reads bounded native-exposed text, not byte-identical HAR/wire data.",
+        "Only declared producer attempts refresh extracted values; unrelated responses do not.",
     ]
 
 
@@ -278,7 +294,7 @@ class GenerationBuilder:
         }
         diagnostics = tuple(d for build in builds for d in build.diagnostics)
         document = deepcopy(base_report.document)
-        document["report_schema_version"] = "1.6" if runtime else "1.3"
+        document["report_schema_version"] = "1.7" if runtime else "1.3"
         document["targets"] = {target: target_metadata.get(target, {"status": "not_requested"})
                                for target in TARGETS}
         jmeter_generated = statuses.get("jmeter") == "generated"
@@ -308,7 +324,7 @@ class GenerationBuilder:
         if runtime:
             _runtime_report(document, statuses)
         document["generation"] = {
-            "profile": profile, "profile_version": "3" if authored else "4" if runtime else "1",
+            "profile": profile, "profile_version": "4" if authored else "5" if runtime else "1",
             "producer_version": __version__,
             "cookie_policy": COOKIE_POLICY,
             "initial_cookies": [cast(JSONValue, asdict(cookie)) for cookie in plan.initial_cookies],
@@ -332,6 +348,7 @@ class GenerationBuilder:
         if runtime:
             generation = cast(dict[str, JSONValue], document["generation"])
             generation.update({"failure_wire_policy": "error_marker_json_string_v1",
+                                "response_header_policy": RESPONSE_HEADER_POLICY,
                                 "native_input_policy": INPUT_POLICY,
                                 "generator_policy": GENERATOR_POLICY,
                                 "missing_input_policy": "marker_and_continue",

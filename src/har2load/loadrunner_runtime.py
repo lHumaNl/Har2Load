@@ -5,12 +5,14 @@ from collections.abc import Iterator
 from typing import cast
 from urllib.parse import quote, quote_plus
 
+from har2load import loadrunner_headers as headers
 from har2load import loadrunner_sources as sources
 from har2load.domain import Diagnostic, JSONValue
 from har2load.extension_runtime import capability_diagnostics
 from har2load.extension_runtime import declarations as extension_records
 from har2load.extraction import MAX_MATCHES, parse_json_path
 from har2load.loadrunner_json import parser_lines
+from har2load.response_headers import header_diagnostics
 from har2load.runtime_types import (
     MAX_RUNTIME_FIELD_BYTES,
     MAX_RUNTIME_VALUE_BYTES,
@@ -23,6 +25,8 @@ from har2load.values import matches_type
 
 DOC_PATHS = (
     "web/lrFr_web_reg_save_param_ex.htm", "web/lrFr_web_set_max_html_param_len.htm",
+    "web/etc/lrFr_SearchFltrsForSaveParamRegFncts.htm",
+    "web/etc/lrFr_AttsForSaveParamRegFuncts.htm",
     "c_vuser/lrFr_lr_eval_string_ext.htm", "c_vuser/lrFr_lr_eval_string_ext_free.htm",
     "c_vuser/lrFr_lr_save_string.htm",
     "c_vuser/lrFr_lr_end_transaction.htm", "c_vuser/lrFr_lr_output_message.htm",
@@ -33,7 +37,10 @@ LIMITATIONS = (
     "Native parameter files support a conservative ASCII subset; SDK presence is unverified.",
     "Authored bodies are not sandboxed; no crash, undefined-behavior or loop containment.",
     "Dependencies are unsupported; helper contracts and native effects remain author-owned.",
-    "Body boundary_v1 and strict scalar JSON subset only; header/cookie extractors blocked.",
+    "Body boundary_v1, strict scalar JSON and response_headers/name_v1; cookies blocked.",
+    "Header text <=1MiB, <=1000 fields, selected ASCII strings <=65536 bytes; no merging.",
+    "Header SDK serialization/order/encoding and overflow/status side effects unverified.",
+    "NotFound=warning is not an SDK overflow guarantee; byte limits are not memory caps.",
     "UTF-8 without NUL; response transcoding/native buffer semantics unverified.",
     "JSON: depth 64, 4096 nodes, 1024 keys/object, absolute exponent <=10000.",
     "C static state requires native per-Vuser isolation; template verification pending.",
@@ -239,6 +246,8 @@ def _template_errors(template: RuntimeTemplate, entity: str,
 
 
 def _extractor_errors(ext: dict[str, JSONValue]) -> Iterator[Diagnostic]:
+    if ext["area"] == "response_headers":
+        return  # Shared header diagnostics validate name/dialect without changing the model.
     selector = obj(ext["selector"])
     if (ext["area"] != "response_body" or selector["dialect"] not in
             ("boundary_v1", "json_path_subset_v1")):
@@ -256,6 +265,7 @@ def diagnostics(runtime: RuntimePlan) -> tuple[Diagnostic, ...]:
     errors = [e for v in runtime.variables for e in _variable_errors(v, authored)]
     errors.extend(capability_diagnostics(runtime, "loadrunner"))
     errors.extend(sources.diagnostics(runtime))
+    errors.extend(header_diagnostics(runtime, "loadrunner"))
     for ext in runtime.extractors:
         errors.extend(_extractor_errors(ext))
     for request in runtime.requests:
@@ -276,6 +286,7 @@ def helpers() -> Iterator[str]:
     yield f"#define H2L_MATCH_LIMIT {MAX_MATCHES}"
     yield from _HELPERS.splitlines()
     yield from parser_lines()
+    yield from headers.helpers()
 
 
 def _comment(kind: str, entity: str) -> str:
@@ -377,31 +388,34 @@ def registration(runtime: RuntimePlan, exchange: str) -> Iterator[str]:
     for variable in runtime.variables:
         if obj(variable["source"]).get("extractor_id") in producer_ids:
             yield f"    {symbol('RESET_FN', identifier(variable))}();"
-    if producer_ids:
-        yield '    h2l_ok = lr_save_string("", "H2L_RESPONSE") == LR_PASS;'
-        yield f'    if (web_set_max_html_param_len("{MAX_RUNTIME_FIELD_BYTES}") != LR_PASS)'
-        yield '        h2l_ok = 0;'
-        yield '    if (web_reg_save_param_ex("ParamName=H2L_RESPONSE", "LB=", "RB=",'
-        yield '        "NotFound=warning", SEARCH_FILTERS, "Scope=Body", LAST) != LR_PASS)'
-        yield '        h2l_ok = 0;'
+    areas = {str(e["area"]) for e in runtime.extractors if e["exchange_id"] == exchange}
+    yield from headers.registration(areas, MAX_RUNTIME_FIELD_BYTES)
 
 
 def _selector_lines(ext: dict[str, JSONValue]) -> Iterator[str]:
     selector = obj(ext["selector"])
     occurrence = min(cast(int, ext.get("occurrence", 1)), MAX_MATCHES + 1)
     empty = int(bool(ext["allow_empty"]))
-    if selector["dialect"] == "boundary_v1":
+    if ext["area"] == "response_headers":
+        args = [literal(cast(str, selector["name"])), str(occurrence),
+                str(int(ext["cardinality"] == "exactly_one")), str(empty)]
+        yield f"    h2l_header_select(&result, &headers, {', '.join(args)});"
+    elif selector["dialect"] == "boundary_v1":
         args = [literal(cast(str, selector[k])) for k in ("left", "right")]
         args += [str(occurrence), str(int(ext["cardinality"] == "exactly_one")), str(empty)]
         yield f"    h2l_boundary(&result, h2l_response, {', '.join(args)});"
     else:
-        path = parse_json_path(cast(str, selector["expression"]))
-        yield "    static const h2l_path path[] = {"
-        for token in path:
-            yield (f"        {{ {literal(token)}, 0 }}," if isinstance(token, str)
-                   else f"        {{ NULL, {min(token, MAX_RUNTIME_FIELD_BYTES)}UL }},")
-        yield "        { NULL, 0 }\n    };"
-        yield f"    h2l_json_select(&result, &document, path, {len(path)}, {occurrence}, {empty});"
+        yield from _json_selector_lines(cast(str, selector["expression"]), occurrence, empty)
+
+
+def _json_selector_lines(expression: str, occurrence: int, empty: int) -> Iterator[str]:
+    path = parse_json_path(expression)
+    yield "    static const h2l_path path[] = {"
+    for token in path:
+        yield (f"        {{ {literal(token)}, 0 }}," if isinstance(token, str)
+               else f"        {{ NULL, {min(token, MAX_RUNTIME_FIELD_BYTES)}UL }},")
+    yield "        { NULL, 0 }\n    };"
+    yield f"    h2l_json_select(&result, &document, path, {len(path)}, {occurrence}, {empty});"
 
 
 def _extractor_lines(runtime: RuntimePlan, ext: dict[str, JSONValue]) -> Iterator[str]:
@@ -420,16 +434,19 @@ def extraction_lines(runtime: RuntimePlan, exchange: str) -> Iterator[str]:
     if not extractors:
         return
     json_used = any(obj(e["selector"])["dialect"] == "json_path_subset_v1" for e in extractors)
-    yield "    h2l_response = h2l_capture(h2l_ok && h2l_rc == LR_PASS);"
+    areas = {str(e["area"]) for e in extractors}
+    if "response_body" in areas:
+        yield "    h2l_response = h2l_capture(h2l_ok && h2l_rc == LR_PASS);"
+    if "response_headers" in areas:
+        yield "    h2l_headers_response = h2l_headers_capture(h2l_headers_ok && h2l_rc == LR_PASS);"
+        yield "    h2l_headers_parse(&headers, h2l_headers_response);"
     if json_used:
         yield "    h2l_json_parse(&document, h2l_response);"
     for ext in extractors:
         yield from _extractor_lines(runtime, ext)
     if json_used:
         yield "    h2l_json_free(&document);"
-    yield "    free(h2l_response);"
-    yield '    if (lr_save_string("", "H2L_RESPONSE") != LR_PASS)'
-    yield '        h2l_fail("ERROR_CAPTURE_RESET");'
+    yield from headers.cleanup(areas)
 
 
 def source_map(runtime: RuntimePlan) -> Iterator[dict[str, JSONValue]]:

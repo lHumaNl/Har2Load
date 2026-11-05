@@ -26,6 +26,7 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
+from har2load.response_headers import RESPONSE_HEADER_POLICY
 from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY, initial_values
 from har2load.runtime_types import (
     EXTENSION_RUNTIME_PROFILE,
@@ -91,10 +92,11 @@ def _metadata(runtime_plan: RuntimePlan | None = None,
     return {
         "profile": (EXTENSION_RUNTIME_PROFILE if authored
                     else RUNTIME_PROFILE if runtime_plan else GENERATION_PROFILE),
-        "profile_version": "3" if authored else "4" if runtime_plan else "1",
+        "profile_version": "4" if authored else "5" if runtime_plan else "1",
         "artifact_kind": "jmx",
         "cookie_policy": COOKIE_POLICY, "initial_cookie_count": cookie_count,
         **({"input_policy": INPUT_POLICY, "generator_policy": GENERATOR_POLICY,
+            "response_header_policy": RESPONSE_HEADER_POLICY,
             "udv_encoding": sources.UDV_ENCODING} if runtime_plan else {}),
         **({"output_commit_policy": "per_output_validated_v1"} if authored else {}),
         "native_status_policy": RUNTIME_STATUS_POLICY,

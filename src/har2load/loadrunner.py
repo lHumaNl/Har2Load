@@ -17,6 +17,7 @@ from har2load.generation_types import (
     RequestPlan,
     TargetBuild,
 )
+from har2load.response_headers import RESPONSE_HEADER_POLICY
 from har2load.runtime_sources import GENERATOR_POLICY, INPUT_POLICY
 from har2load.runtime_types import (
     EXTENSION_RUNTIME_PROFILE,
@@ -113,14 +114,15 @@ Native runtime configuration may still affect network behavior; review it first.
 
 def _runtime_metadata(model: RuntimePlan) -> dict[str, JSONValue]:
     result: dict[str, JSONValue] = {
-        "profile": RUNTIME_PROFILE, "profile_version": "4",
+        "profile": RUNTIME_PROFILE, "profile_version": "5",
         "limitations": list(runtime.LIMITATIONS), "json_failure_wire_policy": "quoted_error_marker",
         "runtime_state_isolation": "per_vuser_native_verification_pending",
         "native_status_policy": RUNTIME_STATUS_POLICY,
         "input_policy": INPUT_POLICY, "generator_policy": GENERATOR_POLICY,
+        "response_header_policy": RESPONSE_HEADER_POLICY,
     }
     if extensions.enabled(model):
-        result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="3",
+        result.update(profile=EXTENSION_RUNTIME_PROFILE, profile_version="4",
                       output_commit_policy="per_output_validated_v1")
     return result
 
@@ -310,6 +312,9 @@ def _runtime_buffers(request: RuntimeRequest, model: RuntimePlan) -> Iterator[st
         yield f"    const char *fallback_{name} = {fallback};"
         yield f"    h2l_buffer buffer_{name}; char *{name};"
     yield "    int h2l_ok = 1, h2l_rc; char *h2l_response; h2l_json document;"
+    if any(e["area"] == "response_headers" and e["exchange_id"] == request.id
+           for e in model.extractors):
+        yield "    int h2l_headers_ok = 1; char *h2l_headers_response; h2l_headers headers;"
 
 
 def _runtime_materialize(request: RuntimeRequest) -> Iterator[str]:

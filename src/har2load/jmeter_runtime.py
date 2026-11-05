@@ -14,10 +14,12 @@ from typing import cast
 from xml.sax.saxutils import escape
 
 from har2load import jmeter_extensions as extensions
+from har2load import jmeter_response as response
 from har2load import jmeter_sources as sources
 from har2load.domain import JSONValue
 from har2load.extension_runtime import capability_diagnostics
 from har2load.extraction import parse_json_path
+from har2load.response_headers import MAX_RESPONSE_HEADER_FIELDS, header_diagnostics
 from har2load.runtime_types import (
     MAX_RUNTIME_FIELD_BYTES,
     MAX_RUNTIME_VALUE_BYTES,
@@ -40,14 +42,13 @@ SOURCES = [
     "https://raw.githubusercontent.com/apache/jmeter/rel/v5.5/src/protocol/http/src/main/java/org/apache/jmeter/protocol/http/sampler/HTTPSamplerBase.java",
     "https://raw.githubusercontent.com/FasterXML/jackson-core/jackson-core-2.13.3/src/main/java/com/fasterxml/jackson/core/JsonParser.java",
     "https://raw.githubusercontent.com/apache/groovy/GROOVY_3_0_11/subprojects/groovy-json/src/main/java/groovy/json/JsonSlurper.java",
-]
+] + response.SOURCES
 LIMITATIONS = [
     "Runtime behavior/native loading/wire parity have not been verified.",
     "Native inputs are private literal-encoded UDV strings snapshotted once per thread.",
     "Generators run only at declared initialization; no uniqueness or security-token promise.",
     "Non-opted-in authored extensions are unsupported.",
     "Authored scalar_body_v1 source is unsafe native code, not sandboxed or behavior-verified.",
-    "Response header/cookie extraction is unsupported; native header normalization is unverified.",
     "Response bodies require strict UTF-8; absent charset means UTF-8, other charsets fail.",
     "Unsuccessful native HTTP samples fail extraction, including HTTP error responses.",
     "Failed JSON bindings emit ERROR_<name> strings, including numeric/boolean/null declarations.",
@@ -55,7 +56,7 @@ LIMITATIONS = [
     "Whole-field assembly failure emits an invalid-URL failed sample without sending HTTP.",
     "BigDecimal preserves numeric value, not spelling or the sign of zero; scale is bounded.",
     "Debug Sampler and View Results Tree expose private live values; redaction is off.",
-]
+] + response.LIMITATIONS
 
 
 class RuntimeRejected(Exception):
@@ -68,7 +69,8 @@ def templates(request: RuntimeRequest) -> tuple[RuntimeTemplate, ...]:
 
 
 def validate_runtime(plan: RuntimePlan) -> None:
-    diagnostics = capability_diagnostics(plan, "jmeter") + sources.capability_diagnostics(plan)
+    diagnostics = (capability_diagnostics(plan, "jmeter") + sources.capability_diagnostics(plan)
+                   + header_diagnostics(plan, "jmeter"))
     if diagnostics:
         raise RuntimeRejected(diagnostics[0].code)
     variables = {cast(str, v["id"]) for v in plan.variables}
@@ -77,15 +79,21 @@ def validate_runtime(plan: RuntimePlan) -> None:
             "literal", "extracted", "agent_code", "external", "generated",
         }:
             raise RuntimeRejected("JMETER_RUNTIME_SOURCE_UNSUPPORTED")
+    _validate_extractors(plan)
+    for request in plan.requests:
+        _validate_templates(request, variables)
+
+
+def _validate_extractors(plan: RuntimePlan) -> None:
     for extractor in plan.extractors:
+        if extractor["area"] == "response_headers":
+            continue  # Shared capability checks above enforce name_v1 and ASCII token bounds.
         if extractor["area"] != "response_body":
             raise RuntimeRejected("JMETER_RUNTIME_RESPONSE_ITEMS_UNSUPPORTED")
         if cast(dict[str, JSONValue], extractor["selector"])["dialect"] not in {
             "boundary_v1", "json_path_subset_v1",
         }:
             raise RuntimeRejected("JMETER_RUNTIME_SELECTOR_UNSUPPORTED")
-    for request in plan.requests:
-        _validate_templates(request, variables)
 
 
 def _validate_templates(request: RuntimeRequest, variables: set[str]) -> None:
@@ -149,7 +157,8 @@ def configuration(plan: RuntimePlan, event: str, request: RuntimeRequest | None 
               "request": asdict(request) if request is not None else None, "event": event,
               "state_key": STATE_KEY, "value_limit": MAX_RUNTIME_VALUE_BYTES,
               "field_limit": MAX_RUNTIME_FIELD_BYTES, "match_limit": MAX_MATCHES,
-               "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL,
+                "depth_limit": MAX_DEPTH, "failed_url": FAILED_URL,
+                "header_field_limit": MAX_RESPONSE_HEADER_FIELDS,
                "generator_attempts": sources.REJECTION_ATTEMPTS,
               "extensions": extensions.configuration(plan, setup=event == extensions.SETUP_EVENT)}
     return _encode_configuration(config, budget)
@@ -348,43 +357,7 @@ def parseJson = { String text ->
         return result
     } finally { parser.close() }
 }
-def responseText = {
-    def bytes = prev.getResponseData()
-    if (bytes.length > cfg.field_limit) fail()
-    // Do not use JMeter's ISO-8859-1 default or replacement-character decoding.
-    def charset = (prev.getDataEncodingNoDefault() ?: 'UTF-8').toUpperCase(Locale.ROOT)
-    if (!(charset in ['UTF-8', 'UTF8'])) fail()
-    def decoder = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-    decoder.decode(ByteBuffer.wrap(bytes)).toString()
-}
-def boundaries = { String text, selector ->
-    def values = []; int position = 0
-    while (values.size() <= cfg.match_limit) {
-        int start = text.indexOf(selector.left, position)
-        if (start < 0) break
-        start += selector.left.length()
-        int end = text.indexOf(selector.right, start)
-        if (end < 0) break
-        values.add(text.substring(start, end))
-        position = end + selector.right.length()
-    }
-    values
-}
-def matches = { e ->
-    def text = responseText()
-    if (e.selector.dialect == 'boundary_v1') return boundaries(text, e.selector)
-    def value = parseJson(text)
-    for (token in e.selector.tokens) {
-        if (token.containsKey('key') && value instanceof Map && value.containsKey(token.key)) {
-            value = value[token.key]
-        } else if (token.containsKey('index') && value instanceof List) {
-            def index = new BigInteger(token.index)
-            if (index >= value.size()) return []
-            value = value[index.intValue()]
-        } else return []
-    }
-    [value]
-}
+__HAR2LOAD_RESPONSE__
 def responseAvailable = { transportSucceeded }
 def choose = { e ->
     if (!responseAvailable()) fail()
@@ -393,6 +366,7 @@ def choose = { e ->
     if (values.size() > cfg.match_limit || occurrence > values.size()) fail()
     if (e.cardinality == 'exactly_one' && values.size() != 1) fail()
     def value = values[occurrence.intValue() - 1]
+    if (e.area == 'response_headers' && value.toCharArray().any { (int) it >= 127 }) fail()
     if (value == '' && !e.allow_empty) fail()
     if (value instanceof Map || value instanceof List) fail()
     utf8(scalarText(value), cfg.value_limit as int)
@@ -496,4 +470,5 @@ if (cfg.event == 'iteration_start') {
 return null
 '''.lstrip().replace('__HAR2LOAD_EXTENSIONS__', extensions.RUNTIME_SCRIPT).replace(
     '__HAR2LOAD_INPUT_SNAPSHOT__', sources.SNAPSHOT_SCRIPT).replace(
-    '__HAR2LOAD_SOURCES__', sources.RUNTIME_SCRIPT)
+    '__HAR2LOAD_SOURCES__', sources.RUNTIME_SCRIPT).replace(
+    '__HAR2LOAD_RESPONSE__', response.RUNTIME_SCRIPT)

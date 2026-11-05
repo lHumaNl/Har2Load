@@ -103,7 +103,7 @@ def test_selected_cookies_publish_native_configuration_without_mutating_model(
     assert SECRET not in json.dumps(result) and selection not in json.dumps(result)
     assert hashes(workspace) == before
     report = json.loads((output / "report.json").read_bytes())
-    assert report["report_schema_version"] == ("1.6" if runtime else "1.3")
+    assert report["report_schema_version"] == ("1.7" if runtime else "1.3")
     seed = report["generation"]["initial_cookies"][0]
     assert seed["value"] == SECRET and seed["source_exchange_id"] == exchange
     assert seed["source_area"] == area and seed["source_index"] == 0

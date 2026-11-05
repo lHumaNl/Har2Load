@@ -1,5 +1,81 @@
 # Explicit synthetic runtime validation
 
+## Response-header source verification — 2026-11-05, 0.11.0a1
+
+`header_cases.py` supplies 50 shared synthetic vectors for `native_response_headers_v1`.
+`c_runtime/test_headers.py` exercises emitted C using an independent fake header
+capture channel. `jmeter/test_headers.py` and `HeaderHarness.groovy` execute real
+JSR223 processors over synthetic SampleResults on JMeter 5.5 / Java 8u512.
+They do not read a real HAR, start HTTP sampling, or certify SDK serialization.
+
+Header tests cover case-insensitive names, duplicate occurrence/cardinality, edge
+SP/HTAB trimming, whole-field Set-Cookie data, string-only values, malformed framing,
+controls and size/count limits. Additional cases cover producer-attempt reset,
+unrelated-response retention, lifecycle boundaries, independent body/header failures,
+successful-output retention, failed native results, marker-only status behavior,
+wrapper consumption, cookie non-regression and inert function-looking data.
+C checks include capture registration/preclear failures, allocation/UTF-8 errors,
+NULL eval cleanup and no-eval paths. JMeter counts header getter calls and tests two
+workers, ensuring parsing is cached only within the current processor invocation.
+
+Initial lead verification (before the whitespace-cost review correction below):
+
+- **1730 default tests passed**, through both pytest entry points; Ruff and mypy
+  passed (42 source modules). Without native opt-in, **308 tests skip**.
+- Fresh C suite: **303 passed in 122.24s**, including 92 new header tests and all
+  prior 211. Root: `har2load-headers-lead-c-qe4YHg`.
+- Fresh JMeter suite: **5 batches passed in 496.05s**: 90 header cases × two workers,
+  53 baseline, 55 authored, 101 source and 20 cookie cases. Root:
+  `har2load-headers-lead-jmeter-PxMJp4`. All **319 executed JMX digests** verified.
+- C and JMeter were separate fresh runs, not one aggregate pytest process. Native
+  processes used the existing network-denied harness; C used ASan/UBSan.
+- Actual installed **0.10 → 0.11** smoke passed: an existing header model formerly
+  blocked by generation now produces both targets, with and without explicit cookie
+  seeds. Historical revisions, immutable HAR/model objects, schema 1.5 and manifest
+  hashes were verified. All **42 source/wheel/installed modules are byte-identical**.
+  Root: `har2load-headers-upgrade-iLW49w`; wheel SHA-256:
+  `0da08607c64fde85090c205b7ad13b5faa92a428492e0a6a194c801108cde97e`.
+
+Evidence paths are beneath the approved temporary root. Consolidated ledger:
+`har2load-headers-lead-jmeter-PxMJp4/lead-verification.json`, SHA-256
+`af2edfb810a1f5a89ec261607eeeeaaa6db688ed6da6df26056f98a41676a2ea`.
+Older records below describe earlier versions and must not replace current evidence.
+
+The independent JMeter review subsequently identified quadratic backtracking in
+the trailing SP/HTAB trimming regex for long internal whitespace. The lead replaced
+it with forward/backward index scans and a single substring; internal whitespace
+remains data. A structural regression was RED before the fix. Four new shared
+native vectors exercise tabs and spaces in selected 64-KiB values and unselected
+500,000-character internal runs. The shared set now has 54 vectors. Post-fix native
+evidence and package fingerprints supersede the initial ledger above; the pre-fix
+ledger is not current-tree attestation.
+
+**Final post-fix verification:** 1731 default tests passed through both entry points,
+Ruff/mypy passed (42 modules), and 312 native tests skip without opt-in. The fresh
+C suite passed **307 tests in 119.87s** at `har2load-headers-final-c-FNltpc`.
+The fresh JMeter suite passed **5 batches in 529.16s** at
+`har2load-headers-final-jmeter-5kbhq7`: **94 header cases × two workers**, plus the
+unchanged 229 baseline cases. All **323 executed JMX digests** were verified.
+The focused post-fix header run also passed before the complete suite.
+
+Final installed 0.10→0.11 smoke and 42-module byte equality were repeated at
+`har2load-headers-final-install-Jpge76`; final wheel SHA-256:
+`902217677c7b42590e6e2427ac4e04987e6da3662308160db35203e6bf6567b4`.
+Final consolidated ledger:
+`har2load-headers-final-jmeter-5kbhq7/lead-verification.json`, SHA-256
+`a0b5782adc5ec70f86d71b8b67f78bfda638ce4bfeb5d78d2007c832e7f578f6`.
+Independent shared and C gates approved; JMeter re-review approved the linear-time
+fix and closed F1. All current findings are closed. The production source and
+harness fingerprints in the final ledger identify the checked revision of the
+uncommitted work; publication is separate.
+
+These results do **not** establish actual VuGen SDK header formatting/order/encoding,
+capture-overflow/native-status containment, JMeter engine scheduling or wire/HAR
+parity. Generated user reports correctly remain `native_validation: not_run`;
+developer fixture verification is not execution of the user's scenario.
+Datasets/CSV integration is outside the deterministic core, not an outstanding
+acceptance criterion for this suite. Opaque declared CSV dependencies remain data.
+
 This directory is **not** part of the installable package or the default `tests/`
 suite. It never runs from `har2load import`, `inspect`, `validate` or `generate`.
 It is a separately invoked developer harness for generated fixed runtime code and

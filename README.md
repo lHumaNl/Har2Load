@@ -43,14 +43,14 @@ application does not contain an LLM client or contact captured endpoints.
 - Native cookie sessions: empty initial jars by default, with explicit selected HAR
   cookie seeds through `generate --initial-cookie`; no fixed captured Cookie headers.
 
-**Not implemented yet:** explicit boundary overrides, filters, datasets, expressions,
+**Not implemented yet:** explicit boundary overrides, filters, expressions,
 collection variables, regex/native selectors, native component properties/allowlists,
-response-header/cookie runtime
+response-cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 author/critic skills, per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.10.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.11.0a1` writes workspace schema `2.0` with scenario
 schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -66,7 +66,7 @@ Existing `0.8.0a1` workspaces remain readable/editable. Adding `source.initial_v
 requires audited `upgrade_native_inputs` from scenario 1.4 to 1.5. The upgrade
 preserves existing declarations and never invents initial values; historical revisions
 retain their original schema.
-Existing `0.9.0a1` workspaces remain readable. Cookie generation options require no
+Existing `0.9.0a1` and `0.10.0a1` workspaces remain readable. Cookie generation options require no
 schema upgrade and never mutate the model; the generated private report records them.
 
 ## Install
@@ -498,6 +498,8 @@ are not fallback live values. Unbound fields remain capture-derived data.
 - Extractors: `response_body` with `json_path_subset_v1` or `boundary_v1`, including
   explicit cardinality/occurrence and `allow_empty`. Unreferenced extractors are
   still emitted and checked rather than silently discarded.
+- `response_headers` with `name_v1` uses those same variables, bindings and lifecycle;
+  header names have no special semantic rules. See the bounded native profile below.
 - JSON extraction distinguishes missing from null and strings from numeric tokens.
   Duplicate keys, invalid Unicode, non-scalar results and resource-limit violations
   fail extraction; no binary-float conversion is used for decimal values.
@@ -514,14 +516,57 @@ are not fallback live values. Unbound fields remain capture-derived data.
 - Agent-code producers require an explicitly opted-in supported target wrapper.
   No environment, external file, random generator or authored code is
   evaluated during preparation; declared dependencies are not read or downloaded.
-- Response-header/cookie runtime extraction is blocked rather than treating native
-  normalized headers or a persistent cookie jar as equivalent to HAR response arrays.
+- Response-cookie runtime extraction remains blocked; a persistent cookie jar is
+  not treated as the current HAR response cookie array.
 
 Existing static request prerequisites still apply: unsupported uploads, compression,
 recorded Authorization headers and unresolved request representations are
 not made safe merely by adding runtime variables. Target-specific errors can still
 leave another target's files and diagnostic reports; exit status remains 3 if any
 requested target is blocked.
+
+### Native response-header extraction
+
+`native_response_headers_v1` adds an ordinary source to existing correlation.
+Declare `area: "response_headers"` and `selector: {"dialect": "name_v1", "name":
+"X-Token"}` on the existing extractor. Any supported header name works; there are
+no CSRF-specific rules, hardcoded recorded values or inferred refresh events.
+The selector name must be an ASCII HTTP token of 1–256 characters. Matching is
+case-insensitive, with existing exactly-one or explicit one-based occurrence
+semantics. Duplicate fields retain their native-exposed order; commas are not split.
+
+Values are **strings**, including `001`, `false` and `null`; incompatible declared
+variable types fail rather than coercing text. Only edge SP/HTAB is trimmed. Internal
+whitespace, colons and quotes remain data. Selecting `Set-Cookie` returns the entire
+field as an ordinary string, not a cookie value; no cookie parser or jar lookup is added.
+
+Only a declared producer attempt resets and refreshes its outputs. Unrelated responses
+preserve saved values; declared lifecycle boundaries still reset them. Successful-native-
+result gating is unchanged (`prev.isSuccessful()` / `h2l_rc == LR_PASS`). Missing,
+ambiguous or invalid extraction leaves `ERROR_<name>` and value-free diagnostics,
+continues, and does not generate a native-status override. Independent valid header
+or body outputs survive another extraction/channel failure. A binding-local unsafe
+header value does not invalidate the shared scalar or its valid JSON use.
+
+The parser accepts one native-exposed header block, LF or CRLF, with an optional first
+final-response status line and no required final blank separator. Visible folding,
+bare CR, controls, leading blank framing, multiple status/response blocks and fields
+after a blank terminator fail closed. Limits: 1 MiB capture, 1000 fields and 64 KiB
+selected value. Selected values use bounded ASCII; valid UTF-8 non-ASCII unselected
+values may remain. These are output/parser limits, not process-memory caps.
+
+JMeter reads `SampleResult.getResponseHeaders()` independently of response-body
+decoding. Its HTTP stack may already unfold or normalize headers. LoadRunner registers
+a separate `Scope=Headers` capture before the producer and keeps body/header buffers,
+registration results and cleanup independent. `H2L_RESPONSE_HEADERS` is reserved.
+Exact SDK serialization, capture-overflow/status effects and HTTP wire parity remain
+unverified; `NotFound=warning` does not establish native failure containment.
+This profile is **not byte-identical HAR/browser/wire parity**. Preparation never
+executes targets, and generated reports continue to say native validation `not_run`.
+
+Datasets/CSV loading, row cursors and EOF policy are **outside the deterministic
+core**, not a required next feature. If needed, an external agent handles that
+integration. Existing native scalar initial inputs are separate and remain supported.
 
 ### Native initial inputs and generated sources
 
@@ -556,14 +601,14 @@ synthetic C stubs. Unsupported table representations block that target, not the 
 or an otherwise supported JMeter output. Consult generated `loadrunner/README.txt`.
 The current table subset is nonempty printable ASCII, without quotes, commas or
 leading/trailing spaces; empty, Unicode and multiline initials are blocked. The
-native capture key `H2L_RESPONSE` is reserved. Runtime edits of configured parameters
+native capture keys `H2L_RESPONSE` and `H2L_RESPONSE_HEADERS` are reserved. Runtime edits of configured parameters
 still undergo strict UTF-8/type/size checks. This is not proof of arbitrary native
 table encoding or quiet missing-parameter detection.
 
 `native_initial_snapshot_v1` reads those snapshots at declared initialization events.
 Missing/invalid values emit `ERROR_<name>` and value-free diagnostics, continue, and
 never override native status; there is no external-input preflight stop. Native loader
-failures are not claimed to be contained. Dataset preflight/EOF is separate and unimplemented.
+failures are not claimed to be contained. Dataset preflight/EOF is outside this core.
 
 `per_user_generated_scalars_v1` uses per-user state and computes only at declared
 lifecycle events, never per binding: inclusive signed-64 integers (including the full
@@ -632,14 +677,14 @@ live values are small—for example, three maximum-size JSON slots exceed 1 MiB.
 Native representation details such as numeric spelling/negative zero may differ;
 successful JSON numeric values are not intentionally converted through binary floats.
 
-The runtime report uses schema **1.6**; static generation uses 1.3 and ordinary
+The runtime report uses schema **1.7**; static generation uses 1.3 and ordinary
 model-only `report` remains 1.1. Runtime maps link each variable, initializer, reset,
 extractor and binding to actual native locations and file hashes; missing, duplicate
 or unexpected declaration mappings refuse publication. Removed mappings remain in
 revision history. Reports disclose failure-wire policy and per-target implementation
 status separately from captured extraction checks. The scalar runtime profile now
-reports `profile_version: "4"` for native cookie preparation. Authored wrappers use
-`authored_scalar_runtime_v1`, version 3, with `per_output_validated_v1` publication.
+reports `profile_version: "5"` for native response headers. Authored wrappers use
+`authored_scalar_runtime_v1`, version 4, with `per_output_validated_v1` publication.
 
 **Runtime correctness/native compatibility is not certified by these artifacts.**
 The default Python `tests/` suite inspects structure, data, ordering and contracts;
@@ -717,8 +762,8 @@ results, unreferenced extractors, unresolved candidates, conflicts and diagnosti
 Source-map entries remain `not_generated`; targets are `not_generated` or `blocked`
 when a required counterpart is missing. No JMX/C aliases or component locators are
 fabricated. Opaque code/helper declarations, source digests, declared calls and
-runtime dependencies are included; their execution and dataset support remain
-explicit limitations. Source annotations,
+runtime dependencies are included; their execution remains explicitly unverified.
+Dataset integration is outside the deterministic core. Source annotations,
 purpose text and captured values are data, never instructions to execute.
 
 The JSON and Markdown pair describes the same pinned revision. Markdown uses
@@ -925,7 +970,7 @@ Limits: 256 variables, 256 extractors, 1024 bindings; 1 MiB UTF-8 per local body
 check and active textual binding view; 64 JSON containers/path tokens; 256-character
 selectors/delimiters; 1000 matches. Overflow is unverified, not a truncated success.
 Literal strings are limited to 65536 characters. Unknown source/selector dialects
-are rejected, not silently approximated. Dataset/expression/collection
+are rejected, not silently approximated. Expression/collection
 support and the bounded regex profile remain future work in the full specification.
 
 ## Opaque target code and helpers
@@ -1289,7 +1334,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.10.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.11.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

@@ -96,7 +96,7 @@ def test_cookie_metadata_is_value_free_and_profiles_advance(
     build = JMeterGenerator().generate(replace(factory(), initial_cookies=(seed(),)))
     assert build.metadata["initial_cookie_count"] == 1
     assert build.metadata["cookie_policy"] == COOKIE_POLICY
-    versions = {plan: "1", runtime_plan: "4", authored: "3"}
+    versions = {plan: "1", runtime_plan: "5", authored: "4"}
     assert build.metadata["profile_version"] == versions[factory]
     for private in (seed().value, seed().domain, seed().source_exchange_id):
         assert private not in json.dumps(build.metadata)
