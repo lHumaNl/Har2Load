@@ -13,11 +13,11 @@ from har2load.jmeter_composition import compose_jmx
 from har2load.presentation import envelope
 from har2load.reporting import ReportPublisher
 from har2load.serialization import canonical_bytes, metadata_object
+from har2load.shared_steps import TF_LABEL, read_shared_plan
 from har2load.workspace import read_limited
 
 _MAX_UCS = 16
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
-_LABEL = re.compile(r"TF_[A-Za-z0-9][A-Za-z0-9_.-]{0,59}")
 _SHA = re.compile(r"[a-f0-9]{64}")
 _KNOWN = frozenset({ARTIFACT, "report.md", "report.json", "loadrunner/Action.c",
                     "loadrunner/globals.h", "loadrunner/vuser_init.c", "loadrunner/vuser_end.c",
@@ -158,7 +158,7 @@ def _source(label: str, root: Path, budget: _Budget) -> _Source:
     _verify_targets(manifest, report, generation.get("requested_targets"), native)
     if (files["report.json"] != manifest.get("report_sha256")
             or report.get("report_schema_version") != schema
-            or report.get("producer_version") not in ("0.11.0a1", "0.12.0a1")
+            or report.get("producer_version") not in ("0.11.0a1", "0.12.0a1", "0.13.0a1")
             or report["producer_version"] != generation.get("producer_version")
             or generation.get("profile") != profile or generation.get("profile_version") != version
             or generation.get("native_artifact_digests") != native
@@ -196,13 +196,14 @@ def _publish(destination: Path, files: dict[str, bytes], manifest: bytes) -> Non
                             "Preserve partial output and select a new destination.", 5) from None
 
 
-def compose_jmeter(sources: list[tuple[str, Path]], output: Path | None) -> dict[str, JSONValue]:
+def compose_jmeter(sources: list[tuple[str, Path]], output: Path | None, *,
+                   shared_steps: Path | None = None) -> dict[str, JSONValue]:
     """One UC per independent debug group; check performs all work except publication."""
     if not 2 <= len(sources) <= _MAX_UCS:
         raise Har2LoadError("COMPOSE_COUNT_INVALID", "Specify between 2 and 16 UCs.", 2)
     labels = [label for label, _ in sources]
     unique = {s.lower() for s in labels}
-    if any(not _LABEL.fullmatch(s) for s in labels) or len(unique) != len(labels):
+    if any(not TF_LABEL.fullmatch(s) for s in labels) or len(unique) != len(labels):
         raise Har2LoadError("COMPOSE_LABEL_INVALID", "Expected distinct safe TF_ labels.", 2)
     if output is not None:
         try:
@@ -221,13 +222,23 @@ def compose_jmeter(sources: list[tuple[str, Path]], output: Path | None) -> dict
             verified.append(_source(label, path, budget))
         except Har2LoadError as error:
             raise Har2LoadError(error.code, f"UC input #{index}: {error}", 3) from None
-    jmx = compose_jmx([(label, uc.jmx) for label, uc in zip(labels, verified, strict=True)])
+    inputs = [(label, uc.jmx) for label, uc in zip(labels, verified, strict=True)]
+    sharing = None
+    if shared_steps is not None:
+        pins = {label: _digest(uc.provenance["manifest_sha256"])
+                for label, uc in zip(labels, verified, strict=True)}
+        sharing = read_shared_plan(shared_steps, pins)
+    jmx = compose_jmx(inputs, shared_steps=sharing.blocks) if sharing else compose_jmx(inputs)
     report: dict[str, JSONValue] = {
         "schema_version": "1.0", "producer_version": __version__, "policy": _POLICY,
         "sources": [uc.provenance for uc in verified], "jmx_sha256": _hash(jmx),
         "source_maps": "source_artifacts_only", "native_validation": "not_run",
         "execution": "not_run", "redaction": "off", "contains_sensitive_data": True,
     }
+    if sharing:
+        # Private report only. These decisions are supplied, not conclusions of the CLI.
+        report.update(schema_version="1.1", shared_steps=sharing.document,
+                      shared_steps_sha256=sharing.digest, shared_steps_policy="explicit_groups_v1")
     payloads = {ARTIFACT: jmx, "composition.json": canonical_bytes(report)}
     manifest: dict[str, JSONValue] = {
         "kind": "composed_jmeter_artifacts", "schema_version": "1.0", "status": "complete",
@@ -235,6 +246,8 @@ def compose_jmeter(sources: list[tuple[str, Path]], output: Path | None) -> dict
         "execution": "not_run", "native_validation": "not_run", "redaction": "off",
         "contains_sensitive_data": True, "files": {k: _hash(v) for k, v in payloads.items()},
     }
+    if sharing:
+        manifest["shared_block_count"] = len(sharing.blocks)
     if output is not None:
         _publish(output, payloads, canonical_bytes(manifest))
     return envelope("compose.jmeter", {**manifest, "write_performed": output is not None})

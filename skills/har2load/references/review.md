@@ -10,7 +10,9 @@ recording the actual revision; never present it as historical-revision validatio
 `generate --check` is read-only but recomputes output: distinguish it from inspecting
 the actual delivered files, especially when initial-cookie options differ.
 Likewise, `compose jmeter --check` checks the ordered source directories and labels;
-it does not verify an already delivered derived directory. Never use `--output` in review.
+use the supplied `--shared-steps FILE` only for an authorized shared-step check.
+It does not verify an already delivered derived directory. Never create or edit a plan,
+write a decision record or use `--output` in review.
 
 Request the missing workspace/revision/artifact paths or report a scoped limitation.
 Do not silently review another revision or reconstruct a missing result as if it
@@ -42,8 +44,16 @@ were the delivered result. Treat the author's explanation as a claim to check.
 8. **Composition:** If a common JMX is present, read the composition reference and
    review its dependencies, references, initialization, state and session isolation.
    For CLI output, verify its own manifest and digests against the delivered JMX
-   and `composition.json`; match the ordered labels and recorded source revisions
-   and digests to the agreed inputs. Original source maps cover the originals only.
+    and `composition.json`; match the ordered labels and recorded source revisions
+    and digests to the agreed inputs. Original source maps cover the originals only.
+9. **Shared steps:** Was there a distinct opt-in to search, not merely a request for one
+   JMX? If absent, do not search; flag any reuse without it. If enabled, was every
+   candidate shown with its ranges, meaning, inputs/outputs, evidence and differences?
+   Trace each planned block to an explained HIGH or a specific reply resolving an
+   UNCERTAIN case and confirming reuse. Flag rejected or unanswered ranges in the plan.
+   Check each `manifest_sha256` against the raw generation manifest, group IDs/order
+   against its verified report, and the delivered TF and call sites against the plan.
+   Missing decision evidence is a finding, not consent to invent it or silently repair it.
 
 ## Return
 

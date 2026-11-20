@@ -28,9 +28,25 @@ solely because a filename happens to contain "jmeter".
 Treat `TF_UC1`, `TF_UC2`, `TF_UC1.1`, `TF_UC1.2` as user-agreed labels, not built-in
 semantics. Ask whether a dotted suffix denotes a variant, a subflow or another
 organizational convention; do not invent a hierarchy. `generate` names fragments
-per model group. `compose jmeter` in 0.12.0a1 takes a generated directory per UC
+per model group. `compose jmeter` takes a generated directory per UC
 and an exact whole-UC fragment label. It does not implement shared sessions or an
 execution schedule. If those are required, discuss a separate manual design.
+
+## Shared-step choice
+
+Whenever a common JMX for multiple UCs is requested (including from existing bundles),
+ask once at intake, alongside any missing layout decisions:
+
+> For the common JMX, would you like me to look for steps the UCs could reuse,
+> or keep each UC's steps separate? Each virtual user keeps its own session either way.
+
+Reuse an explicit answer already given for this task. A request to compose says nothing
+about sharing steps; a request to **look** says nothing about permission to publish.
+With a refusal or no reply, do not search, create a plan or pass `--shared-steps`;
+proceed with ordinary composition only if independently requested. Do not keep asking.
+With opt-in, follow [Select shared steps](jmeter-composition.md#select-shared-steps).
+This applies to any business step, not just sign-in. In review mode, assess the
+recorded choice and evidence without writing any decision record, plan or output.
 
 ## Several recordings of one UC
 
@@ -56,7 +72,8 @@ drop requests to manufacture a combined scenario.
   their relationship before choosing final UCs or a primary recording.
 - "A and B are repeats; use B. C is another UC; put both UCs in one JMX": do not
   repeat those questions. Use A as supporting evidence, B/C as authoring bases;
-  clarify only unresolved UC labels/session/assembly semantics.
+  reuse the supplied mapping, offer the shared-step choice unless already answered,
+  and clarify only unresolved UC labels/session/assembly semantics.
 - "Two UCs for VuGen": keep one UC per Solution in this project's workflow, but
   disclose that current generation supplies C scaffolds, not complete Solutions.
 - Existing workspace: resume through the CLI at a known revision; do not reimport

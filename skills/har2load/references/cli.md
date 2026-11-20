@@ -3,8 +3,9 @@
 Contents: [Discovery](#locate-the-executable) · [Recipes](#exact-command-recipes) ·
 [Responses](#read-responses-accurately) · [Recovery](#writes-failures-and-resuming)
 
-Baseline: Har2Load **0.12.0a1**, workspace schema 2.0, scenario schema 1.5.
-Existing 0.11.0a1 workspaces need no migration. Its CLI did not have `compose jmeter`.
+Baseline: Har2Load **0.13.0a1**, workspace schema 2.0, scenario schema 1.5.
+Existing 0.11.0a1/0.12.0a1 workspaces need no migration. The 0.11.0a1 CLI
+cannot compose; 0.12.0a1 can compose but has no `--shared-steps FILE`.
 The skill is external to the Python package; loading it does not install the CLI.
 
 ## Locate the executable
@@ -55,7 +56,9 @@ report output and generated output destination must be **nonexistent**. A parent
 session directory can exist. Do not pre-create the leaf that the CLI reserves.
 
 For a common JMX, use `compose jmeter` with generated directories, **not** a
-workspace or JMX file. See [composition recipes and input limits](jmeter-composition.md#compose-with-the-0120a1-cli).
+workspace or JMX file. See [composition recipes and input limits](jmeter-composition.md#compose-independent-ucs).
+The optional [shared-step plan](jmeter-composition.md#write-and-check-the-plan)
+selects explicit source ranges for composition; the CLI does not discover candidates.
 
 ## Read responses accurately
 

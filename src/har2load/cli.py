@@ -109,6 +109,8 @@ def parser() -> argparse.ArgumentParser:
     compose_jmx.add_argument("--uc", nargs=2, action="append", required=True,
                              metavar=("TF_LABEL", "GENERATION_DIRECTORY"),
                              help="Use one generated JMeter bundle; specify 2 to 16 labeled UCs")
+    compose_jmx.add_argument("--shared-steps", action="append", type=Path, metavar="FILE",
+                             help="Explicit pinned plan of shared step groups; default: no reuse")
     output = compose_jmx.add_mutually_exclusive_group(required=True)
     output.add_argument("--check", action="store_true", help="Validate and render without writes")
     output.add_argument("--output", type=Path, help="New private composition directory")
@@ -144,8 +146,11 @@ def main(argv: list[str] | None = None) -> int:
             from har2load.composition import compose_jmeter
 
             operation = "compose.jmeter"
+            plans = args.shared_steps or []
+            if len(plans) > 1:
+                raise Har2LoadError("COMPOSE_SHARED_PLAN_INVALID", "Specify at most one plan.", 2)
             result = compose_jmeter([(label, Path(source)) for label, source in args.uc],
-                                    output=args.output)
+                                    output=args.output, shared_steps=plans[0] if plans else None)
         elif operation == "generate":
             result = app.generate(
                 args.workspace, output=args.output, revision=args.revision,

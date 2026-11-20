@@ -18,12 +18,13 @@ from har2load import jmeter, jmeter_extensions, jmeter_runtime, parameters, valu
 from har2load.cookies import NativeCookie
 from har2load.domain import Har2LoadError, JSONValue
 from har2load.generation_types import MAX_GENERATED_BYTES, NativeGroup, NativeRequest, RequestPlan
+from har2load.jmeter_shared_steps import Caller, add_parameters, lower_shared_steps
 from har2load.runtime_types import RuntimePlan, RuntimeRequest, RuntimeSlot, RuntimeTemplate
+from har2load.shared_steps import TF_LABEL, SharedBlock
 
 _INVALID = "COMPOSE_JMX_INVALID"
 _LIMIT = "COMPOSE_LIMIT"
 _AUTHORED = "COMPOSE_AUTHORED_UNSUPPORTED"
-_LABEL = re.compile(r"TF_[A-Za-z0-9][A-Za-z0-9_.-]{0,59}")
 _MIN_UCS, _MAX_UCS = 2, 16
 _DEPTH, _NODES = 48, 128_000  # Per document, before appending the offending element.
 _REGISTRY = re.compile(re.escape(jmeter_extensions.REGISTRY_PREFIX) + "[a-f0-9]{64}")
@@ -214,7 +215,7 @@ def _runtime(root: ET.Element) -> RuntimePlan | None:
                        extension_namespace=key.removeprefix(jmeter_extensions.REGISTRY_PREFIX))
 
 
-def _verify(root: ET.Element) -> None:
+def _verify(root: ET.Element) -> RequestPlan:
     runtime = _runtime(root)
     groups, lists = zip(*_steps(root[0][1], runtime is not None), strict=True)
     requests = tuple(r for step in lists for r in step)
@@ -223,6 +224,7 @@ def _verify(root: ET.Element) -> None:
     result = jmeter.JMeterGenerator().generate(plan)
     _require(result.status == "generated" and
              _same(root, ET.fromstring(result.files[jmeter.ARTIFACT])))
+    return plan
 
 
 def _input_name(label: str, key: str) -> str:
@@ -245,34 +247,22 @@ def _relocate_keys(root: ET.Element, label: str) -> None:
                     child.text = encoded
 
 
-def _user_parameters(branch: ET.Element, plan: ET.Element, label: str) -> None:
-    entries = plan.findall("elementProp/collectionProp/elementProp")
-    if not entries:
-        return
-    node, _ = jmeter._component(branch, "UserParameters", "UserParametersGui", "Initial inputs")
-    names = ET.SubElement(node, "collectionProp", name="UserParameters.names")
-    users = ET.SubElement(node, "collectionProp", name="UserParameters.thread_values")
-    values = ET.SubElement(users, "collectionProp", name="0")
-    for i, entry in enumerate(entries):
-        jmeter._property(names, str(i), _input_name(label, _prop(entry, "Argument.name")))
-        jmeter._property(values, str(i), _prop(entry, "Argument.value"))
-    jmeter._property(node, "UserParameters.per_iteration", False)
-
-
 def _debug(debug: ET.Element, cookie: _Pair, plan: ET.Element, label: str) -> None:
     modules = _pairs(debug)
     debug[:] = list(cookie)
     if modules[0][0].tag == "JSR223Sampler":
         init = modules.pop(0)
         debug.extend(init)
-        _user_parameters(init[1], plan, label)
+        entries = plan.findall("elementProp/collectionProp/elementProp")
+        add_parameters(init[1], [(_input_name(label, _prop(e, "Argument.name")),
+                                  _prop(e, "Argument.value")) for e in entries])
     module, children = modules[0]
     module.set("testname", "MC_" + label)
     module[0][2].text = label
     debug.extend((module, children, *modules[-1]))
 
 
-def _uc(root: ET.Element, label: str, output: ET.Element) -> None:
+def _uc(root: ET.Element, label: str, output: ET.Element, plan: RequestPlan) -> Caller:
     _relocate_keys(root, label)
     cookie, (group, debug), *steps, _ = _pairs(root[0][1])
     group.set("testname", "DebugTG_" + label)
@@ -284,14 +274,14 @@ def _uc(root: ET.Element, label: str, output: ET.Element) -> None:
         fragment.tag = "GenericController"
         fragment.attrib.update(testclass=fragment.tag, guiclass="LogicControllerGui")
         wrapped.extend((fragment, contents))
+    return Caller(plan, wrapped, debug)
 
 
-def _append_input(ordinal: int, label: str, data: bytes, output: ET.Element) -> ET.Element:
+def _append_input(ordinal: int, label: str, data: bytes, output: ET.Element
+                  ) -> tuple[ET.Element, Caller]:
     try:
         root = _parse(data)
-        _verify(root)
-        _uc(root, label, output)
-        return root
+        return root, _uc(root, label, output, _verify(root))
     except Har2LoadError as error:
         code = error.code if error.code.startswith("COMPOSE_") else _INVALID
     except (jmeter._Rejected, jmeter_runtime.RuntimeRejected):
@@ -301,27 +291,44 @@ def _append_input(ordinal: int, label: str, data: bytes, output: ET.Element) -> 
     raise Har2LoadError(code, f"JMeter composition is blocked for UC input #{ordinal}.", 3)
 
 
-def _compose(inputs: list[tuple[str, bytes]]) -> bytes:
+def _compose(inputs: list[tuple[str, bytes]], blocks: tuple[SharedBlock, ...]) -> bytes:
     _require(_MIN_UCS <= len(inputs) <= _MAX_UCS)
     _require(all(isinstance(data, bytes) for _, data in inputs))
     _require(sum(len(data) for _, data in inputs) <= MAX_GENERATED_BYTES, _LIMIT)
-    _require(all(_LABEL.fullmatch(s) for s, _ in inputs) and
+    _require(all(TF_LABEL.fullmatch(s) for s, _ in inputs) and
              len({s.lower() for s, _ in inputs}) == len(inputs))
     output = ET.Element("hashTree")
+    callers: dict[str, Caller] = {}
     for ordinal, (label, data) in enumerate(inputs, 1):
-        root = _append_input(ordinal, label, data, output)
+        root, caller = _append_input(ordinal, label, data, output)
+        if blocks:
+            callers[label] = caller
+    if blocks:
+        lower_shared_steps(output, callers, blocks)
+    return _finish(root, output, len(blocks))
+
+
+def _finish(root: ET.Element, output: ET.Element, count: int) -> bytes:
     output.extend(_pairs(root[0][1])[-1])
     plan = root[0][0]
     del plan[2][0][:]  # Confirmed 0.11 TestPlan.user_defined_variables/Arguments.arguments.
     del plan[3:]  # 0.11 private UDV instructions refer to the old, global plan.
     root[0][1] = output
-    return jmeter._serialize(root)
+    try:
+        return jmeter._serialize(root)
+    except jmeter._Rejected:
+        if count:
+            raise Har2LoadError("COMPOSE_SHARED_LIMIT",
+                                f"Composition exceeds the output limit after block #{count}.",
+                                3) from None
+        raise
 
 
-def compose_jmx(inputs: list[tuple[str, bytes]]) -> bytes:
+def compose_jmx(inputs: list[tuple[str, bytes]], *, shared_steps: tuple[SharedBlock, ...] = ()
+                ) -> bytes:
     """Return a complete private JMX or a value-free exit-3 error; performs no I/O."""
     try:
-        return _compose(inputs)
+        return _compose(inputs, shared_steps)
     except Har2LoadError as error:
         if error.code.startswith("COMPOSE_"):
             raise

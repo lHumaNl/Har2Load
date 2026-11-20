@@ -47,6 +47,7 @@ LoadRunner artifacts. The application has no LLM client and contacts no captured
 - Native response-header sources for existing variables, bindings and lifecycle.
 - Offline [JMeter composition](#compose-independent-jmeter-use-cases) of supported
   generated use cases (UCs), each with its own single-user debug entry point.
+  Optionally reuse explicitly selected common steps without sharing user state.
 - External [har2load skill](skills/har2load/SKILL.md): agent-first intake, audited CLI
   preparation, read-only review instructions and cautious JMeter UC transfer guidance.
 
@@ -57,7 +58,7 @@ extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
 per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.12.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.13.0a1` writes workspace schema `2.0` with scenario
 schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -75,7 +76,7 @@ preserves existing declarations and never invents initial values; historical rev
 retain their original schema.
 Existing `0.9.0a1` and `0.10.0a1` workspaces remain readable. Cookie generation options require no
 schema upgrade and never mutate the model; the generated private report records them.
-Existing `0.11.0a1` workspaces remain readable; composition requires no model migration.
+Existing `0.11.0a1` and `0.12.0a1` workspaces remain readable; composition requires no model migration.
 
 ## Install
 
@@ -128,6 +129,11 @@ agent confirms primary recordings and labels such as `TF_UC1` or `TF_UC1.1` rath
 than inventing their meaning. Existing workspaces can also be resumed without import.
 
 For a common JMX with independent debug users, [compose the generated UCs](#compose-independent-jmeter-use-cases).
+At intake, the agent asks once whether to look for reusable steps or keep the UCs separate,
+unless you already answered. Requesting one JMX is not permission to look for shared steps.
+“No” or no reply means no search and no sharing. If you opt in, the agent shows every
+candidate, explains high-confidence matches and asks about uncertain ones; unanswered
+or rejected steps stay separate. See the [catalog example and plan format](skills/har2load/references/jmeter-composition.md#select-shared-steps).
 For other layouts, the skill provides [external/manual transfer guidance](skills/har2load/references/jmeter-composition.md).
 Copying Test Fragments alone can omit inputs, cookies, initialization and Module Controller references.
 For this workflow, use one UC per VuGen Solution; current LoadRunner output remains
@@ -199,6 +205,9 @@ input/arguments/limits, `3` invalid or unsupported workspace/changeset,
 `4` existing destination, busy workspace, stale revision or reused change ID,
 `5` I/O failure, `1` unexpected internal failure. Import succeeds for
 diagnosable incomplete entries; this does **not** certify an executable scenario.
+For `compose jmeter`, an existing output directory, composition size limit or
+blocked source/range returns `3`; use the diagnostic code to distinguish these
+from a stale source pin. Malformed sharing plans and repeated plan flags return `2`.
 
 ## Revisioned changes
 
@@ -460,9 +469,8 @@ Rather than silently accept that known transformation, this target is blocked wi
 
 ### Compose independent JMeter use cases
 
-Use the `0.12.0a1` CLI with 2–16 **trusted local output directories** from `generate --output`,
-each containing a generated JMeter plan, its report and completion manifest. The `0.11.0a1`
-CLI cannot compose, but its eligible outputs can be used without regeneration. For example,
+Use the `0.13.0a1` CLI with 2–16 **trusted local output directories** from `generate --output`,
+each containing a generated JMeter plan, its report and completion manifest. For example,
 given two generated UCs and their agreed Test Fragment (TF) labels:
 
 ```sh
@@ -484,7 +492,7 @@ The composer qualifies input keys internally; identical exported names such as
 UC, regenerate it, and compose into a new directory. Do not move the module calls
 into one shared thread and expect the same isolation.
 
-Accepted producers are `0.11.0a1` and `0.12.0a1`; supported profiles are
+Accepted producers are `0.11.0a1`, `0.12.0a1` and `0.13.0a1`; supported profiles are
 `static_literals_v1` version 1 and `scalar_runtime_v1` version 5 without extensions.
 The CLI verifies source manifests and file digests. Matching hashes detect changes
 relative to a manifest; they do **not** authenticate its author or make an unknown
@@ -498,6 +506,29 @@ digests and statuses), then `manifest.json` last. Verify the manifest and digest
 preserve incomplete output and retry with a new path. Original source maps describe
 only their original files. Neither mode runs JMeter, sends HTTP, merges HAR/LoadRunner
 files or establishes native readiness.
+
+**Optional shared steps (`0.13.0a1`):** Without `--shared-steps FILE`, the composer
+does not detect or reuse common steps. With it, one root TF represents each accepted
+block; each participating UC calls it in place through a Module Controller. For example,
+two UCs can open the catalog and subcatalog before one browses an item and the other
+searches. Their suffixes, cookie jars and runtime values remain independent.
+
+Prepare a private [shared-step plan](skills/har2load/references/jmeter-composition.md#write-and-check-the-plan)
+from the verified generation reports and manifest hashes. Then, with `H2L` set to the CLI path:
+
+```sh
+"$H2L" compose jmeter --uc TF_UC1 workspaces/catalog --uc TF_UC1.1 workspaces/search --shared-steps workspaces/shared.json --check
+"$H2L" compose jmeter --uc TF_UC1 workspaces/catalog --uc TF_UC1.1 workspaces/search --shared-steps workspaces/shared.json --output workspaces/common-shared
+```
+
+An incompatible or unmapped range blocks composition; the CLI does not guess variable
+mappings, coerce differences or silently publish a partial plan. This option changes
+composition only: no model edits or runtime plan loader. The `0.12.0a1` CLI supports
+ordinary composition only; the `0.11.0a1` CLI cannot compose.
+
+Use the CLI to apply a plan file. The internal `compose_jmx` tree renderer assumes
+the application has already verified source pins and enforced plan-size bounds;
+it is not a public API for validating or loading user decisions.
 
 ### LoadRunner intermediate source
 
@@ -1417,7 +1448,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.12.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.13.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

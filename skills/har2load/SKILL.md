@@ -16,7 +16,7 @@ language. Do not require the user to run `import` before invoking this skill.
   [review.md](references/review.md); do not import, apply, generate outputs or edit files.
 - Read [intake.md](references/intake.md) before interpreting multiple recordings.
 - Read [cli.md](references/cli.md) before invoking the tool; it defines discovery,
-  commands, continuation and recovery for the 0.12.0a1 baseline.
+  commands, continuation and recovery for the 0.13.0a1 baseline.
 - Read [model.md](references/model.md) before authoring a changeset.
 - Read [target-code.md](references/target-code.md) only when ordinary scalar
   declarations cannot express the approved transformation.
@@ -42,6 +42,11 @@ relationship, primary recording where needed, requested UC labels/grouping, and
 whether a common JMX is desired. Reuse decisions already in the user's request.
 Do not make a compulsory questionnaire when one input and the requested output
 are clear. Ask a compact, actionable question when the intent is ambiguous.
+
+For any requested multi-UC common JMX, offer the [shared-step choice](references/intake.md#shared-step-choice)
+at intake, even with a complete UC mapping. Ask once, not again if already answered.
+Permission to compose is not permission to search for or reuse shared steps.
+Without opt-in, do neither. Sharing a step never means sharing users or sessions.
 
 ## 2. Keep recordings, UC decisions and workspaces distinct
 
@@ -118,8 +123,11 @@ report, not a default-only recomputation without the flags.
 
 For a requested common JMX, use `compose jmeter` after generating eligible UCs
 independently. Confirm the labels and that separate debug users match the intent.
-Follow the composition reference for eligibility, output verification and external
-alternatives; copying TFs alone is not a verified assembly. Keep original outputs intact. For this workflow,
+If the user opted in, follow the [candidate review and plan procedure](references/jmeter-composition.md#select-shared-steps).
+Show every candidate, include only explained high-confidence or explicitly confirmed
+matches, and leave rejected or unanswered ranges separate. Use `--shared-steps FILE`
+only with an eligible plan. Follow the composition reference for output verification
+and external alternatives; copying TFs alone is not a verified assembly. Keep original outputs intact. For this workflow,
 use **one UC per VuGen Solution**; current C output is only a scaffold/integration
 assets, not a complete Solution or a fabricated `.usr` project.
 
@@ -127,6 +135,7 @@ assets, not a complete Solution or a fabricated `.usr` project.
 
 Report:
 - UC/recording decisions and any unresolved question;
+- shared-step choice and, if enabled, dispositions and reasons for both reused and separate steps;
 - workspace, pinned revision and generated output paths;
 - which correlations/transformations were added and why, without secret values;
 - recorded checks, target generation status and blocked/unsupported items;

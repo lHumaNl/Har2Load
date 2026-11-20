@@ -1,5 +1,15 @@
 # Explicit synthetic runtime validation
 
+## Shared JMeter steps — 0.13.0a1
+
+Run `python -m pytest validation/jmeter/test_shared_steps.py` with the same
+network-denied opt-in as for composition below. The fixture loads a synthetic
+two-UC plan, resolves all four module references, converts the tree, then
+advances each compiled Thread Group through its entry, catalog, subcatalog and
+distinct follow-up request. It checks per-user inputs, cookie jars and extraction
+with synthetic responses, including a missing result for only one caller. No
+HTTP sampler is executed; this is not a load test or a wire-level replay.
+
 ## JMeter composition — 0.12.0a1
 
 With the prerequisites and network-denied opt-in below, run
