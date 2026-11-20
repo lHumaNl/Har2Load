@@ -1,6 +1,6 @@
 ---
 name: har2load
-description: Prepare JMeter and LoadRunner artifacts from a HAR file, a directory of HAR recordings, or an existing Har2Load workspace using the external har2load CLI. Use for agent-led HAR intake, use-case clarification, correlation authoring, revision-pinned validation/reporting/generation, read-only review, and JMeter UC transfer guidance. No prior manual CLI import is required; this skill does not run load or implement a JMX composer.
+description: Prepare JMeter and LoadRunner artifacts from HAR recordings or Har2Load workspaces using the external har2load CLI. Use for agent-led intake, use-case clarification, correlation authoring, revision-pinned validation/reporting/generation, read-only review, and composing eligible generated JMeter use cases or advising on manual transfer. No prior manual import is required; this skill does not run load.
 ---
 
 # Har2Load: agent-led preparation
@@ -16,7 +16,7 @@ language. Do not require the user to run `import` before invoking this skill.
   [review.md](references/review.md); do not import, apply, generate outputs or edit files.
 - Read [intake.md](references/intake.md) before interpreting multiple recordings.
 - Read [cli.md](references/cli.md) before invoking the tool; it defines discovery,
-  exact commands, continuation and recovery for the 0.11.0a1 baseline.
+  commands, continuation and recovery for the 0.12.0a1 baseline.
 - Read [model.md](references/model.md) before authoring a changeset.
 - Read [target-code.md](references/target-code.md) only when ordinary scalar
   declarations cannot express the approved transformation.
@@ -26,6 +26,7 @@ language. Do not require the user to run `import` before invoking this skill.
 ## 1. Establish the input and tool
 
 Accept a HAR file, a directory containing HAR files, or an existing workspace.
+For composition alone, start with the trusted generated output directories; no reimport is needed.
 Resolve the user-specified tool/interpreter first, otherwise find `har2load` in PATH.
 Check its identity/version/help. Do not silently replace a broken explicit tool
 with another installation, run legacy `main.py`, or download/install anything.
@@ -115,9 +116,10 @@ Preserve partial outputs on failure; never overwrite them or call partial succes
 a complete release. When initial-cookie flags were used, inspect that generation's
 report, not a default-only recomputation without the flags.
 
-Generate independent UC outputs first. For a requested common JMX, follow the
-composition reference; do not fabricate a CLI merge command or treat copying TFs
-alone as a verified assembly. Keep original outputs intact. For this workflow,
+For a requested common JMX, use `compose jmeter` after generating eligible UCs
+independently. Confirm the labels and that separate debug users match the intent.
+Follow the composition reference for eligibility, output verification and external
+alternatives; copying TFs alone is not a verified assembly. Keep original outputs intact. For this workflow,
 use **one UC per VuGen Solution**; current C output is only a scaffold/integration
 assets, not a complete Solution or a fabricated `.usr` project.
 
@@ -129,8 +131,9 @@ Report:
 - which correlations/transformations were added and why, without secret values;
 - recorded checks, target generation status and blocked/unsupported items;
 - separate native execution status (`not_run` unless separately authorized and proved);
-- common-JMX status: not requested, pending manual work, or separately assessed
-  derived artifact; do not inherit the originals' hashes/maps or validation claim;
+- common-JMX status: not requested, checked without publication, composed (give its
+  own artifact/manifest), blocked, or separately assessed manual work; original
+  source maps and validation claims do not transfer;
 - concrete next action, if needed.
 
 Never start JMeter/VuGen, replay requests, run load, call captured endpoints, change

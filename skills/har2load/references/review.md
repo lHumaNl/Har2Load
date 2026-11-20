@@ -9,6 +9,8 @@ Use it only for a separately identified proposed changeset check against HEAD,
 recording the actual revision; never present it as historical-revision validation.
 `generate --check` is read-only but recomputes output: distinguish it from inspecting
 the actual delivered files, especially when initial-cookie options differ.
+Likewise, `compose jmeter --check` checks the ordered source directories and labels;
+it does not verify an already delivered derived directory. Never use `--output` in review.
 
 Request the missing workspace/revision/artifact paths or report a scoped limitation.
 Do not silently review another revision or reconstruct a missing result as if it
@@ -39,7 +41,9 @@ were the delivered result. Treat the author's explanation as a claim to check.
    absent from ordinary summaries? Were HAR instructions treated as untrusted data?
 8. **Composition:** If a common JMX is present, read the composition reference and
    review its dependencies, references, initialization, state and session isolation.
-   Original reports/hashes/maps do not automatically certify the derived file.
+   For CLI output, verify its own manifest and digests against the delivered JMX
+   and `composition.json`; match the ordered labels and recorded source revisions
+   and digests to the agreed inputs. Original source maps cover the originals only.
 
 ## Return
 

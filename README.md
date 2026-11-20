@@ -45,6 +45,8 @@ LoadRunner artifacts. The application has no LLM client and contacts no captured
 - Native cookie sessions: empty initial jars by default, with explicit selected HAR
   cookie seeds through `generate --initial-cookie`; no fixed captured Cookie headers.
 - Native response-header sources for existing variables, bindings and lifecycle.
+- Offline [JMeter composition](#compose-independent-jmeter-use-cases) of supported
+  generated use cases (UCs), each with its own single-user debug entry point.
 - External [har2load skill](skills/har2load/SKILL.md): agent-first intake, audited CLI
   preparation, read-only review instructions and cautious JMeter UC transfer guidance.
 
@@ -53,9 +55,9 @@ collection variables, regex/native selectors, native component properties/allowl
 response-cookie runtime
 extraction, complete verified VuGen projects,
 runnable bundle export/handoff/redaction,
-CLI JMX composition, per-workspace native validation, and replay. Both JMeter and LoadRunner
+per-workspace native validation, and replay. Both JMeter and LoadRunner
 remain required for the first complete release. Alpha workspaces are not a stable
-interchange format. Version `0.11.0a1` writes workspace schema `2.0` with scenario
+interchange format. Version `0.12.0a1` writes workspace schema `2.0` with scenario
 schema `1.5`. Existing `0.2.0a1` workspaces/scenario `1.1` remain readable and support
 their previous edits; parameters require an explicit `upgrade_parameters` change.
 The previous `0.1.0a1`/workspace `1.0` format is **read-only**. Unknown versions are
@@ -73,6 +75,7 @@ preserves existing declarations and never invents initial values; historical rev
 retain their original schema.
 Existing `0.9.0a1` and `0.10.0a1` workspaces remain readable. Cookie generation options require no
 schema upgrade and never mutate the model; the generated private report records them.
+Existing `0.11.0a1` workspaces remain readable; composition requires no model migration.
 
 ## Install
 
@@ -107,7 +110,7 @@ Give your agent access to [skills/har2load/SKILL.md](skills/har2load/SKILL.md) a
 `references/` directory, using the skill-loading mechanism of your agent harness.
 The skill is distributed separately from the Python wheel: installing `har2load`
 does not register a skill in your agent configuration. It contains instructions,
-not a hidden runner, installer, model client or JMeter composer.
+not a runner, installer or model client. Composition is a CLI operation.
 
 Example request (adapt the paths and use your preferred language):
 
@@ -124,10 +127,9 @@ or a later common JMX. Filenames and matching URLs are not identity proof. The
 agent confirms primary recordings and labels such as `TF_UC1` or `TF_UC1.1` rather
 than inventing their meaning. Existing workspaces can also be resumed without import.
 
-For a common JMX, the skill explains dependency-aware external/manual transfer:
-copying TFs alone can omit inputs, cookies, initialization, Module Controller paths
-and runtime-state isolation. A derived plan needs its own checks and provenance;
-the original manifests remain unchanged. There is **no CLI merge command yet**.
+For a common JMX with independent debug users, [compose the generated UCs](#compose-independent-jmeter-use-cases).
+For other layouts, the skill provides [external/manual transfer guidance](skills/har2load/references/jmeter-composition.md).
+Copying Test Fragments alone can omit inputs, cookies, initialization and Module Controller references.
 For this workflow, use one UC per VuGen Solution; current LoadRunner output remains
 a C scaffold, not a complete Solution. Datasets/CSV remain outside the core.
 
@@ -456,6 +458,47 @@ absent or empty bodies: JMeter 5.5 would otherwise introduce a form Content-Type
 Rather than silently accept that known transformation, this target is blocked with
 `JMETER_CONTENT_TYPE_REQUIRED`; LoadRunner may still produce its scaffold.
 
+### Compose independent JMeter use cases
+
+Use the `0.12.0a1` CLI with 2–16 **trusted local output directories** from `generate --output`,
+each containing a generated JMeter plan, its report and completion manifest. The `0.11.0a1`
+CLI cannot compose, but its eligible outputs can be used without regeneration. For example,
+given two generated UCs and their agreed Test Fragment (TF) labels:
+
+```sh
+har2load compose jmeter --uc TF_UC1 workspaces/catalog --uc TF_UC1.1 workspaces/search --check
+har2load compose jmeter --uc TF_UC1 workspaces/catalog --uc TF_UC1.1 workspaces/search --output workspaces/common-debug
+```
+
+Each `--uc LABEL GEN_DIR` adds one UC in the supplied order. Labels must match
+`TF_[A-Za-z0-9][A-Za-z0-9_.-]{0,59}` and be unique ignoring case. Each UC gets a
+callable fragment with that exact label and a separate single-user debug Thread Group,
+cookie jar and initial variable storage. Plan order is not an execution schedule;
+`TF_UC1.1` does not call `TF_UC1` or share its session.
+
+For example, `DebugTG_TF_UC1` calls `TF_UC1` through its own Module Controller.
+For scalar UCs, supplied external inputs are in **Initial inputs** (User Parameters
+under that group's **Runtime iteration**), not in the combined Test Plan UDV.
+The composer qualifies input keys internally; identical exported names such as
+`token` remain unchanged. To change initial values reproducibly, update the source
+UC, regenerate it, and compose into a new directory. Do not move the module calls
+into one shared thread and expect the same isolation.
+
+Accepted producers are `0.11.0a1` and `0.12.0a1`; supported profiles are
+`static_literals_v1` version 1 and `scalar_runtime_v1` version 5 without extensions.
+The CLI verifies source manifests and file digests. Matching hashes detect changes
+relative to a manifest; they do **not** authenticate its author or make an unknown
+plan safe. Authored/extension plans, edited files, standalone JMX, derived plans and
+unknown profiles are not inputs. Limits: 32 MiB aggregate JMX and 128 MiB total
+source files, including the verified report bytes.
+
+Choose exactly one destination mode. `--check` writes nothing. `--output NEW_DIRECTORY`
+writes the derived `jmeter/scenario.jmx`, private `composition.json` (sources, revisions,
+digests and statuses), then `manifest.json` last. Verify the manifest and digests;
+preserve incomplete output and retry with a new path. Original source maps describe
+only their original files. Neither mode runs JMeter, sends HTTP, merges HAR/LoadRunner
+files or establishes native readiness.
+
 ### LoadRunner intermediate source
 
 `loadrunner/Action.c`, `vuser_init.c`, `vuser_end.c`, `globals.h` and `README.txt`
@@ -619,7 +662,7 @@ numeric input. Shared keys deduplicate equal initials; conflicting explicit stri
 reject the final changeset. An absent declaration can share another variable's initial.
 Redaction is off: explicit secrets are preserved in private native artifacts.
 
-**JMeter:** initials live in the native Test Plan User Defined Variables panel, not
+**Standalone generated JMeter plan:** initials live in the native Test Plan User Defined Variables panel, not
 a custom runtime file. Missing keys are omitted; add a UDV entry to supply one.
 Generated and manually edited values must follow `jmeter_udv_literal_v1`: double
 every backslash, then prefix every `${` opener with a backslash. The runtime reverses
@@ -1374,7 +1417,7 @@ include the development wheels only if needed. In the disconnected environment:
 ```sh
 python -m venv .venv
 # Activate the environment, then:
-python -m pip install --no-index --find-links wheelhouse har2load==0.11.0a1
+python -m pip install --no-index --find-links wheelhouse har2load==0.12.0a1
 # Optional development installation:
 python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
 python -m pip install --no-index --no-build-isolation --no-deps -e .

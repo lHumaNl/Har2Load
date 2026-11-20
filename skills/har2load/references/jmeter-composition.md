@@ -1,8 +1,8 @@
 # JMeter UC transfer and common-plan assembly
 
-This is a separate **post-generation** activity, not HAR merging. Har2Load 0.11 has
-no CLI JMX composer. Keep each generated output directory, report and manifest
-intact. The absence of a composer must not prevent delivering useful separate UCs.
+Composition is a **post-generation** activity, not HAR merging. Keep each generated
+output directory, report and manifest intact. If a common plan is outside the CLI
+profile, deliver the separate UCs and explain what further work would be needed.
 For this workflow, VuGen remains one UC per Solution; do not apply JMeter assembly
 rules to C scaffolds or fabricate missing VuGen project files.
 
@@ -18,7 +18,43 @@ Distinguish a complete UC from a generated step fragment: one scenario can have
 multiple TF groups, Module Controller calls and lifecycle processors. Preserve
 their order and required setup; do not copy just the visibly interesting samplers.
 
-## Inspect the whole dependency set before offering a transfer
+## Compose with the 0.12.0a1 CLI
+
+Use `compose jmeter` when the user wants a callable named Test Fragment and a
+separate single-user debug Thread Group for each UC. Cookies and initial variable
+storage are separate for each UC. The plan retains the supplied UC order; neither
+that order nor a dotted label specifies a runtime schedule, nesting or session sharing.
+
+Pass **2–16 ordered** `--uc LABEL GEN_DIR` pairs. A label must match
+`TF_[A-Za-z0-9][A-Za-z0-9_.-]{0,59}` in full; reject duplicates ignoring case.
+`GEN_DIR` is a complete, trusted local `generate --output` directory with its
+generation manifest, report and generated JMX. Accept only producer `0.11.0a1`
+or `0.12.0a1` and profile `static_literals_v1` version 1 or `scalar_runtime_v1`
+version 5 without extensions. The 0.11.0a1 CLI can produce eligible sources but
+cannot compose them. Never pass arbitrary, modified, standalone, authored/extension
+or previously composed plans. Verification of manifests and digests checks integrity
+relative to the manifest, not who created it: a replacement manifest can match
+replacement files. Do not use composition as a safety check for untrusted bundles.
+
+For example, with a resolved CLI executable `H2L`, two complete generated outputs
+and the user-confirmed labels below, first check, then publish only if requested:
+
+```sh
+"$H2L" compose jmeter --uc TF_UC1 "generated/catalog" --uc TF_UC1.1 "generated/search" --check
+"$H2L" compose jmeter --uc TF_UC1 "generated/catalog" --uc TF_UC1.1 "generated/search" --output "generated/common-debug"
+```
+
+Exactly one of `--check` (read-only) and `--output NEW_DIRECTORY` is required.
+Repeat the same labels, directories and order for publication. Limits are 32 MiB
+aggregate JMX and 128 MiB total source files including verified report bytes.
+In the **new private directory**, check `manifest.json` (written last) and its
+digests for `jmeter/scenario.jmx` and `composition.json`. Review the latter for
+source identities, revisions, digests and statuses; it is not a source map for
+the new tree. Preserve failed output and retry at a fresh path. Do not repair
+manifests or remove extensions to force eligibility. Neither mode runs JMeter
+or sends HTTP. Native execution and wire behavior remain unverified.
+
+## External or manual transfer: inspect dependencies first
 
 For each source JMX, inspect structural data without loading it into a native runner:
 
@@ -66,10 +102,3 @@ not native JMeter validation; original source maps and fixture results no longer
 describe the modified bytes. New checks need their own artifact identity/evidence.
 Native loading, processor execution and HTTP replay each require separate explicit
 authorization and an appropriate safe environment; do not start load to "verify" it.
-
-## Future CLI boundary
-
-A later JMeter-only composer can automate this mechanical work for supported
-Har2Load-generated artifacts. It is not implemented by this skill. Do not invent
-`merge`, `compose`, multi-workspace generation flags or an arbitrary-JMX compatibility
-promise. Keep the UC decisions and dependency record usable for that later task.

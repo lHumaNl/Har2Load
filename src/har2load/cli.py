@@ -104,6 +104,14 @@ def parser() -> argparse.ArgumentParser:
     destination = generate.add_mutually_exclusive_group(required=True)
     destination.add_argument("--check", action="store_true", help="Render/check without writing")
     destination.add_argument("--output", type=Path, help="New private output directory")
+    compose = commands.add_parser("compose", help="Prepare a new independent-UC JMeter plan")
+    compose_jmx = compose.add_subparsers(dest="target", required=True).add_parser("jmeter")
+    compose_jmx.add_argument("--uc", nargs=2, action="append", required=True,
+                             metavar=("TF_LABEL", "GENERATION_DIRECTORY"),
+                             help="Use one generated JMeter bundle; specify 2 to 16 labeled UCs")
+    output = compose_jmx.add_mutually_exclusive_group(required=True)
+    output.add_argument("--check", action="store_true", help="Validate and render without writes")
+    output.add_argument("--output", type=Path, help="New private composition directory")
     return root
 
 
@@ -132,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace, format=args.format, offset=args.offset, limit=args.limit,
                 revision=args.revision, compare_revision=args.compare_revision, output=args.output,
             )
+        elif operation == "compose":
+            from har2load.composition import compose_jmeter
+
+            operation = "compose.jmeter"
+            result = compose_jmeter([(label, Path(source)) for label, source in args.uc],
+                                    output=args.output)
         elif operation == "generate":
             result = app.generate(
                 args.workspace, output=args.output, revision=args.revision,

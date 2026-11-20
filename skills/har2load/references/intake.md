@@ -27,10 +27,10 @@ solely because a filename happens to contain "jmeter".
 
 Treat `TF_UC1`, `TF_UC2`, `TF_UC1.1`, `TF_UC1.2` as user-agreed labels, not built-in
 semantics. Ask whether a dotted suffix denotes a variant, a subflow or another
-organizational convention; do not invent a hierarchy. Har2Load 0.11 generates
-fragments per model group with its own naming policy; renaming a group does not
-guarantee an exact requested whole-UC wrapper. Keep the requested assembly layout
-separate from what the current generator actually emits.
+organizational convention; do not invent a hierarchy. `generate` names fragments
+per model group. `compose jmeter` in 0.12.0a1 takes a generated directory per UC
+and an exact whole-UC fragment label. It does not implement shared sessions or an
+execution schedule. If those are required, discuss a separate manual design.
 
 ## Several recordings of one UC
 

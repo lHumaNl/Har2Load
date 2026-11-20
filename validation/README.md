@@ -1,5 +1,18 @@
 # Explicit synthetic runtime validation
 
+## JMeter composition — 0.12.0a1
+
+With the prerequisites and network-denied opt-in below, run
+`python -m pytest validation/jmeter/test_composition.py`. No external samples are
+needed. The fixture generates and composes source plans locally. It loads four
+derived plans with JMeter 5.5 / Java 8, resolves the actual module targets and
+inspects converted, compiled sampler packages for **two independent UC debug groups**.
+It exercises fixed processors, seeded jars, synthetic response updates, and iteration
+resets with interleaved user contexts. It never starts a JMeter engine or sends HTTP.
+Cases cover colliding `token` and `sid` names, distinct values, escaped native
+metasyntax, missing vs permitted empty inputs, and mixed static/scalar UCs.
+This tests the supported assembly, not thread scheduling or wire compatibility.
+
 ## Response-header source verification — 2026-11-05, 0.11.0a1
 
 `header_cases.py` supplies 50 shared synthetic vectors for `native_response_headers_v1`.
